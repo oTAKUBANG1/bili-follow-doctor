@@ -24,7 +24,7 @@ dsh plugin --profile web add dsh-bili-follow-doctor
 | `bili_follow_scan` | **分批**扫描（工具调用有超时，一次 `limit` 个，反复调直到 `remaining=0`）；`staleDays` 可自定义僵尸阈值 |
 | `bili_follow_list` | 按状态列名单（zombie / deleted / empty / dynonly / alive / all），支持 `staleDays` |
 | `bili_follow_report` | 导出 CSV + Markdown 到 `~/.dsh/bili-follow/out/`，支持 `staleDays` |
-| `bili_follow_unfollow` | 取关（**必须 `confirm:true`**，一次最多 50 个） |
+| `bili_follow_unfollow` | 取关（**必须 `confirm:true`**，一次最多 50 个；正在直播/播过的默认跳过，`allowLive:true` 才删） |
 | `bili_follow_status` | 总览：凭证是否就绪、扫了多少、各状态数量 |
 
 ## 典型流程
@@ -43,6 +43,9 @@ dsh plugin --profile web add dsh-bili-follow-doctor
   `x/space/wbi/arc/search` 大约 60~80 次就会被 HTTP 412 封，全量扫必挂（2026-11-06 实测）。
 - 注销判定：关注列表昵称含「已注销」→ 直接算；否则看 `x/web-interface/card` 的 -404。
 - 最近动态走 `x/polymer/web-dynamic/v1/feed/space`（wbi 签名，本插件自己算）。
+- **直播保护**：视频和动态都停了才去查直播间（`room/v1/Room/getRoomInfoOld` + `get_info`）。
+  B站 不开放"上次开播时间"（离线时 `live_time` 恒为 `0000-00-00`），所以用「直播间有没有自定义标题/分区」
+  判断播没播过 —— 播过的一律保留，不参与自动清理。
 - 结果落 `~/.dsh/bili-follow/cache.json`，中断可续；`refresh:true` 重扫。
 - 凭证也能复用「刷B站」(dsh-bili-scroll) 登录过的那份 `~/.dsh/bili-duty/bili_credential.json`。
 

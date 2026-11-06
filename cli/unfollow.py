@@ -121,12 +121,15 @@ def main():
     ap.add_argument("--cred", default=None, help="凭证 json 路径")
     ap.add_argument("--yes", action="store_true", help="真的执行取关（不加就是 dry-run）")
     ap.add_argument("--allow-large", action="store_true", help="允许一次超过 100 个")
+    ap.add_argument("--include-live", action="store_true",
+                    help="连「有直播间 / 正在直播」的账号也一起取关（默认跳过，防止误删主播）")
     args = ap.parse_args()
 
     if not os.path.exists(args.report):
         raise SystemExit(f"报表不存在：{args.report}")
 
     rows = []
+    live_skipped = 0
     with open(args.report, "r", encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
             try:
@@ -137,6 +140,11 @@ def main():
                 continue
             if args.status and args.status not in (r.get("状态") or ""):
                 continue
+            live_col = (r.get("直播状态") or "").strip()
+            if not args.include_live and live_col in ("正在直播", "播过"):
+                # 开过直播间的账号可能还在播，默认不取关（要强制就加 --include-live）
+                live_skipped += 1
+                continue
             try:
                 days = int(r.get("停更天数") or 0)
             except ValueError:
@@ -144,11 +152,11 @@ def main():
             if days < args.min_days:
                 continue
             if args.max_fans:
-                try:
-                    fans = int(r.get("粉丝数") or 0)
-                except ValueError:
-                    fans = 0
-                if fans > args.max_fans:
+                raw_fans = (r.get("粉丝数") or "").strip()
+                if not raw_fans.isdigit():
+                    # 粉丝数查不到的行不能当成 0 混进"只清小号"的名单里，直接跳过
+                    continue
+                if int(raw_fans) > args.max_fans:
                     continue
             rows.append({"mid": mid, "name": r.get("昵称") or "", "status": r.get("状态") or "",
                          "days": days, "fans": r.get("粉丝数") or ""})
@@ -163,6 +171,8 @@ def main():
         return
 
     print(f"符合条件 {len(rows)} 个：")
+    if live_skipped:
+        print(f"（另有 {live_skipped} 个「有直播间/正在直播」的账号已跳过，要一起处理加 --include-live）")
     print(f"{'UID':<14}{'昵称':<24}{'状态':<14}{'停更天数':<10}{'粉丝'}")
     for r in rows[:60]:
         name = r["name"][:22]

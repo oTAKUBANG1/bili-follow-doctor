@@ -161,6 +161,28 @@ async function lastDynamic(cookie, mid, tries = 2) {
   return { ok: false, err: '动态接口重试耗尽' }
 }
 
+// 直播：B站 不开放「上次开播时间」（离线时 live_time 恒为 0000），
+// 用「直播间有自定义标题/分区」判断播没播过，播过的一律保留
+async function liveInfo(mid) {
+  const none = { room: 0, live: false, streamed: false, title: '' }
+  try {
+    const a = await fetch('https://api.live.bilibili.com/room/v1/Room/getRoomInfoOld?mid=' + mid,
+      { headers: { 'User-Agent': UA, Referer: 'https://live.bilibili.com/' } })
+    const d = (await a.json())?.data || {}
+    const roomid = d.roomid || 0
+    if (!roomid) return none
+    const b = await fetch('https://api.live.bilibili.com/room/v1/Room/get_info?room_id=' + roomid,
+      { headers: { 'User-Agent': UA, Referer: 'https://live.bilibili.com/' } })
+    const e = (await b.json())?.data || {}
+    const title = (e.title || '').trim()
+    const area = (e.area_name || '').trim()
+    const streamed = !(title.startsWith('用户') && title.endsWith('的直播间')) || !!area
+    return { room: roomid, live: e.live_status === 1, streamed, title }
+  } catch {
+    return none
+  }
+}
+
 async function fetchFollowings(cookie, selfMid, onPage) {
   const out = []
   for (let pn = 1; pn <= 100; pn++) {
@@ -194,6 +216,8 @@ function saveCache(cache) {
 function statusOf(r, staleDays = 730) {
   const win = Math.max(30, Number(staleDays) || 730) * 86400
   if (r.deleted) return 'deleted'
+  if (r.liveNow) return 'live'
+  if (r.liveStreamed) return 'streamed'
   if (r.videoTs === 0 && r.dynTs === 0) return 'empty'
   if (r.videoTs === null && r.dynTs === null) return 'error'
   const vStale = r.videoTs === 0 || (r.videoTs && nowSec() - r.videoTs > win)
@@ -207,6 +231,7 @@ const staleDaysOf = (v) => Math.max(30, Number(v) || 730)
 const STATUS_LABEL = {
   deleted: '已注销', zombie: '僵尸号', dynonly: '只发动态',
   empty: '零内容', error: '查询失败', alive: '正常',
+  live: '正在直播', streamed: '播过（保留）',
 }
 
 function fmtDate(ts) {
@@ -346,6 +371,19 @@ export function apply(ctx) {
             const d = await lastDynamic(cookie, mid)
             rec.dynTs = d.ok ? d.ts : null
             if (!d.ok && !rec.err) rec.err = d.err
+
+            // 视频和动态都停了才查直播：主播不能误删
+            const win = staleDaysOf(args.staleDays) * 86400
+            const vStale = rec.videoTs === 0 || (rec.videoTs && nowSec() - rec.videoTs > win)
+            const dStale = !rec.dynTs || nowSec() - rec.dynTs > win
+            if (vStale && dStale) {
+              const li = await liveInfo(mid)
+              rec.liveNow = li.live
+              rec.liveStreamed = li.streamed
+              rec.liveRoom = li.room
+              rec.liveTitle = li.title
+              await sleep(300)
+            }
           }
           await sleep(interval)
         }
@@ -391,7 +429,7 @@ export function apply(ctx) {
       const sd = staleDaysOf(args.staleDays)
       let rows = Object.values(cache.rows).filter((r) => r.checked)
       if (want !== 'all') rows = rows.filter((r) => statusOf(r, sd) === want)
-      const rank = { deleted: 0, zombie: 1, empty: 2, dynonly: 3, error: 4, alive: 5 }
+      const rank = { deleted: 0, zombie: 1, empty: 2, streamed: 3, live: 4, dynonly: 5, error: 6, alive: 7 }
       rows.sort((a, b) => (rank[statusOf(a, sd)] - rank[statusOf(b, sd)])
         || ((nowSec() - (b.videoTs || nowSec())) - (nowSec() - (a.videoTs || nowSec()))))
       const offset = Math.max(0, Number(args.offset) || 0)
@@ -419,7 +457,7 @@ export function apply(ctx) {
       ensureDir(OUT_DIR)
       const sd = staleDaysOf(args.staleDays)
       const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '')
-      const rank = { deleted: 0, zombie: 1, empty: 2, dynonly: 3, error: 4, alive: 5 }
+      const rank = { deleted: 0, zombie: 1, empty: 2, streamed: 3, live: 4, dynonly: 5, error: 6, alive: 7 }
       rows.sort((a, b) => rank[statusOf(a, sd)] - rank[statusOf(b, sd)])
       const counts = {}
       for (const r of rows) counts[statusOf(r, sd)] = (counts[statusOf(r, sd)] || 0) + 1
@@ -438,7 +476,7 @@ export function apply(ctx) {
 
       const md = [`# B站关注体检 ${new Date().toLocaleString('zh-CN')}`, '',
         `共 ${rows.length} 个关注：` + Object.entries(counts).map(([k, v]) => `${STATUS_LABEL[k]} ${v}`).join('，'), '']
-      for (const key of ['deleted', 'zombie', 'empty', 'dynonly', 'error']) {
+      for (const key of ['deleted', 'zombie', 'empty', 'streamed', 'live', 'dynonly', 'error']) {
         const sub = rows.filter((r) => statusOf(r, sd) === key)
         md.push(`## ${STATUS_LABEL[key]}（${sub.length}）`, '')
         if (!sub.length) { md.push('无', ''); continue }
@@ -455,10 +493,11 @@ export function apply(ctx) {
   tool({
     name: 'bili_follow_unfollow',
     description: '取关指定 UID（会真的改账号状态，调用方必须先把名单给使用者看过）。'
-      + '必须传 confirm:true；一次最多 50 个。',
+      + '必须传 confirm:true；一次最多 50 个。正在直播/播过的账号默认会被跳过（主播保护）。',
     parameters: {
       mids: { type: 'array', items: { type: 'number' }, description: '要取关的 UID 列表' },
       confirm: { type: 'boolean', description: '必须为 true，表示使用者已经确认这份名单' },
+      allowLive: { type: 'boolean', description: 'true = 连正在直播/播过的账号也删（默认 false，防误删主播）' },
       intervalMs: { type: 'number', description: '每个取关之间的间隔，默认 1500' },
     },
     async execute(args) {
@@ -469,8 +508,20 @@ export function apply(ctx) {
       const c = needCred()
       if (!c.bili_jct) return { ok: false, err: '凭证里没有 bili_jct（csrf），无法取关' }
       const cache = loadCache()
+      // 主播保护：正在直播 / 播过的账号默认跳过
+      const skippedLive = []
+      const targets = mids.filter((mid) => {
+        const r = cache.rows[String(mid)]
+        if (!r) return true
+        if (!args.allowLive && statusOf(r) === 'live') { skippedLive.push(mid); return false }
+        if (!args.allowLive && statusOf(r) === 'streamed') { skippedLive.push(mid); return false }
+        return true
+      })
+      if (!targets.length) {
+        return { ok: false, err: `这 ${mids.length} 个都是正在直播/播过的账号，已全部跳过（确需删除请传 allowLive:true）` }
+      }
       const results = []
-      for (const [i, mid] of mids.entries()) {
+      for (const [i, mid] of targets.entries()) {
         const r = await fetch('https://api.bilibili.com/x/relation/modify', {
           method: 'POST',
           headers: {
@@ -483,11 +534,12 @@ export function apply(ctx) {
         const name = cache.rows[String(mid)]?.name
         if (ok) delete cache.rows[String(mid)]
         results.push({ mid, name, ok, code: r.code, message: r.message })
-        if (i < mids.length - 1) await sleep(Math.max(500, Number(args.intervalMs) || 1500))
+        if (i < targets.length - 1) await sleep(Math.max(500, Number(args.intervalMs) || 1500))
       }
       saveCache(cache)
       const okCount = results.filter((r) => r.ok).length
-      return { ok: true, okCount, failCount: results.length - okCount, results }
+      return { ok: true, okCount, failCount: results.length - okCount,
+        skippedLive, results }
     },
   })
 
