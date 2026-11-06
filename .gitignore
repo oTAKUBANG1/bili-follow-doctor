@@ -1,0 +1,17 @@
+# 本机数据，不要入库
+out/
+**/out/
+cred.json
+bili_credential.json
+*.cred.json
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+
+# 临时/开发用
+_uitest.html
+_mk_uitest.js
+_selftest.mjs
+*.log

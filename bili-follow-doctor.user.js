@@ -1,0 +1,637 @@
+// ==UserScript==
+// @name         B站关注体检 · Follow Doctor
+// @namespace    https://github.com/mituan/bili-follow-doctor
+// @version      1.0.0
+// @description  扫一遍你的关注列表，标出已注销、两年没更新的僵尸 UP；可一键导出 CSV，也可逐个取关。纯本地运行，不经过任何服务器。
+// @author       米团
+// @match        https://space.bilibili.com/*
+// @icon         https://www.bilibili.com/favicon.ico
+// @grant        GM_xmlhttpRequest
+// @connect      app.bilibili.com
+// @connect      api.bilibili.com
+// @run-at       document-idle
+// @license      MIT
+// ==/UserScript==
+
+/* eslint-disable no-console */
+(() => {
+  "use strict";
+
+  const VERSION = "1.0.0";
+  const CACHE_KEY = "bfd.cache.v2";
+  const CONFIG_KEY = "bfd.config.v1";
+  const TWO_YEARS = 730 * 86400;
+
+  // ---------------------------------------------------------------- 小工具
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const now = () => Math.floor(Date.now() / 1000);
+  const fmtDate = (ts) => {
+    if (!ts) return "-";
+    const d = new Date(ts * 1000);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
+  const days = (ts) => (ts ? Math.floor((now() - ts) / 86400) : "");
+  const num = (n) => {
+    if (n === null || n === undefined || n === "") return "-";
+    if (n >= 1e8) return (n / 1e8).toFixed(1) + "亿";
+    if (n >= 1e4) return (n / 1e4).toFixed(1) + "万";
+    return String(n);
+  };
+  const getCookie = (k) => {
+    const m = document.cookie.match(new RegExp("(?:^|;\\s*)" + k + "=([^;]*)"));
+    return m ? decodeURIComponent(m[1]) : "";
+  };
+  const el = (tag, attrs = {}, ...kids) => {
+    const n = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === "class") n.className = v;
+      else if (k === "style") n.style.cssText = v;
+      else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+      else if (v !== null && v !== undefined) n.setAttribute(k, v);
+    }
+    for (const kid of kids.flat()) {
+      if (kid === null || kid === undefined) continue;
+      n.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+    }
+    return n;
+  };
+
+  // ---------------------------------------------------------------- md5（wbi 签名要用）
+  const md5 = (() => {
+    const S = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+      5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+      4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+      6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21];
+    const K = Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 2 ** 32) >>> 0);
+    return (str) => {
+      const utf8 = unescape(encodeURIComponent(str));
+      const words = [];
+      for (let i = 0; i < utf8.length; i++) words[i >> 2] |= utf8.charCodeAt(i) << (8 * (i % 4));
+      const bitLen = utf8.length * 8;
+      words[bitLen >> 5] |= 0x80 << (bitLen % 32);
+      words[(((bitLen + 64) >>> 9) << 4) + 14] = bitLen;
+      let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+      for (let i = 0; i < words.length; i += 16) {
+        let A = a0, B = b0, C = c0, D = d0;
+        for (let j = 0; j < 64; j++) {
+          let F, g;
+          if (j < 16) { F = (B & C) | (~B & D); g = j; }
+          else if (j < 32) { F = (D & B) | (~D & C); g = (5 * j + 1) % 16; }
+          else if (j < 48) { F = B ^ C ^ D; g = (3 * j + 5) % 16; }
+          else { F = C ^ (B | ~D); g = (7 * j) % 16; }
+          F = (F + A + K[j] + (words[i + g] | 0)) | 0;
+          A = D; D = C; C = B;
+          B = (B + ((F << S[j]) | (F >>> (32 - S[j])))) | 0;
+        }
+        a0 = (a0 + A) | 0; b0 = (b0 + B) | 0; c0 = (c0 + C) | 0; d0 = (d0 + D) | 0;
+      }
+      return [a0, b0, c0, d0].map((w) => {
+        let s = "";
+        for (let i = 0; i < 4; i++) s += ((w >>> (i * 8)) & 0xff).toString(16).padStart(2, "0");
+        return s;
+      }).join("");
+    };
+  })();
+
+  // ---------------------------------------------------------------- 网络层
+  const request = (url, opts = {}) => new Promise((resolve, reject) => {
+    const { method = "GET", headers = {}, body = null } = opts;
+    if (typeof GM_xmlhttpRequest === "function") {
+      GM_xmlhttpRequest({
+        method, url, headers, data: body, timeout: 25000,
+        onload: (r) => {
+          try { resolve({ status: r.status, json: JSON.parse(r.responseText) }); }
+          catch { resolve({ status: r.status, json: null, text: r.responseText }); }
+        },
+        ontimeout: () => reject(new Error("timeout")),
+        onerror: () => reject(new Error("network")),
+      });
+      return;
+    }
+    fetch(url, { method, headers, body, credentials: "include" })
+      .then(async (r) => resolve({ status: r.status, json: await r.json().catch(() => null) }))
+      .catch(reject);
+  });
+
+  // 节流：所有 B站 请求排队，间隔 ≥ interval，遇到 412 整队降温
+  class Throttle {
+    constructor(interval = 1200) {
+      this.interval = interval;
+      this.last = 0;
+      this.cooldownUntil = 0;
+      this.onCooldown = null;
+    }
+    async wait() {
+      while (Date.now() < this.cooldownUntil) {
+        if (this.onCooldown) this.onCooldown(Math.ceil((this.cooldownUntil - Date.now()) / 1000));
+        await sleep(1000);
+      }
+      const gap = this.last + this.interval - Date.now();
+      if (gap > 0) await sleep(gap);
+    }
+    hit() { this.last = Date.now(); }
+    cool(sec) {
+      this.cooldownUntil = Date.now() + sec * 1000;
+      if (this.onCooldown) this.onCooldown(sec);
+    }
+  }
+
+  const api = {
+    cookieNum: 0,
+    async web(path, params = {}, tries = 4) {
+      const q = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null) q.set(k, String(v));
+      const url = "https://api.bilibili.com" + path + "?" + q;
+      for (let i = 0; i < tries; i++) {
+        await app.throttle.wait();
+        let r;
+        try { r = await request(url, { headers: { Referer: location.href } }); }
+        catch (e) { if (i === tries - 1) throw e; await sleep(2000); continue; }
+        app.throttle.hit();
+        if (r.status === 412 || r.status === 429 || r.json?.code === -412) {
+          if (i === tries - 1) throw new Error("被B站限流（412），请过几分钟再继续");
+          app.throttle.cool(30 * (i + 1));
+          continue;
+        }
+        if (!r.json) throw new Error("返回不是 JSON（HTTP " + r.status + "）");
+        return r.json;
+      }
+      throw new Error("重试耗尽");
+    },
+    // 最近投稿：app 通道，免登录态、限速宽松；走 GM 请求绕开跨域
+    async lastVideo(mid, tries = 3) {
+      const p = new URLSearchParams({
+        vmid: mid, pn: "1", ps: "1", order: "pubdate",
+        mobi_app: "android", platform: "android", build: "7700000",
+        appkey: "1d8b6e7d45233436", ts: String(now()),
+      });
+      const sorted = [...p.entries()].sort(([a], [b]) => (a < b ? -1 : 1));
+      const q = sorted.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+      p.set("sign", md5(q + "560c52ccd288fed045859ed18bffd973"));
+      const url = "https://app.bilibili.com/x/v2/space/archive?" + p;
+      for (let i = 0; i < tries; i++) {
+        await app.throttle.wait();
+        try {
+          const r = await request(url, { headers: { Referer: "https://www.bilibili.com/" } });
+          app.throttle.hit();
+          if (r.status === 412 || r.status === 429) { app.throttle.cool(20); continue; }
+          const j = r.json;
+          if (!j) return { ok: false, err: "HTTP " + r.status };
+          if (j.code === 0) {
+            const items = j.data?.item || [];
+            return { ok: true, ts: items.length ? Number(items[0].ctime) || 0 : 0 };
+          }
+          return { ok: false, err: `code ${j.code} ${j.message || ""}` };
+        } catch (e) {
+          if (i === tries - 1) return { ok: false, err: String(e.message || e) };
+          await sleep(1500);
+        }
+      }
+      return { ok: false, err: "重试耗尽" };
+    },
+    async mixinKey() {
+      if (app.wbiKey && app.wbiDay === new Date().toDateString()) return app.wbiKey;
+      const j = await this.web("/x/web-interface/nav", {});
+      const img = (j?.data?.wbi_img?.img_url || "").split("/").pop().split(".")[0];
+      const sub = (j?.data?.wbi_img?.sub_url || "").split("/").pop().split(".")[0];
+      if (!img || !sub) throw new Error("拿不到 wbi key（可能未登录）");
+      const raw = img + sub;
+      const TAB = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,
+        39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,
+        63,57,62,11,36,20,34,44,52];
+      app.wbiKey = TAB.map((i) => raw[i]).join("").slice(0, 32);
+      app.wbiDay = new Date().toDateString();
+      return app.wbiKey;
+    },
+    async lastDynamic(mid, tries = 3) {
+      const key = await this.mixinKey();
+      for (let i = 0; i < tries; i++) {
+        const p = new URLSearchParams({
+          host_mid: mid, timezone_offset: "-480", platform: "web",
+          features: "itemOpusStyle,listOnlyfans,opusBigCover,onlyfansVote",
+          wts: String(now()),
+        });
+        const sorted = [...p.entries()].sort(([a], [b]) => (a < b ? -1 : 1));
+        const q = sorted.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+        p.set("w_rid", md5(q + key));
+        try {
+          const r = await request("https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?" + p,
+            { headers: { Referer: `https://space.bilibili.com/${mid}` } });
+          await sleep(0);
+          const j = r.json;
+          if (!j) return { ok: false, err: "HTTP " + r.status };
+          if (j.code === 0) {
+            const items = j.data?.items || [];
+            return { ok: true, ts: items.length ? Number(items[0].modules?.module_author?.pub_ts) || 0 : 0 };
+          }
+          if (j.code === -412 || r.status === 412) { app.throttle.cool(30); app.wbiKey = null; continue; }
+          return { ok: false, err: `code ${j.code}` };
+        } catch (e) {
+          if (i === tries - 1) return { ok: false, err: String(e.message || e) };
+          await sleep(1500);
+        }
+      }
+      return { ok: false, err: "重试耗尽" };
+    },
+    async followings(selfMid, onPage) {
+      const out = [];
+      for (let pn = 1; pn <= 80; pn++) {
+        const j = await this.web("/x/relation/followings",
+          { vmid: selfMid, pn, ps: 50, order: "desc", order_type: "attention" });
+        if (j.code !== 0) throw new Error(`关注列表读取失败：code ${j.code} ${j.message || ""}（请确认已登录）`);
+        const list = j.data?.list || [];
+        out.push(...list);
+        onPage?.(out.length, j.data?.total || 0);
+        if (list.length < 50 || out.length >= (j.data?.total || 0)) break;
+        await sleep(300);
+      }
+      return out;
+    },
+    async unfollow(mid) {
+      const j = await this.web("/x/relation/modify", {
+        fid: mid, act: 2, re_src: 11, csrf: getCookie("bili_jct"),
+      }, 3);
+      return j.code === 0;
+    },
+    async card(mid) {
+      const j = await this.web("/x/web-interface/card", { mid }, 2);
+      if (j.code === 0 && j.data) return { ok: true, name: j.data.card?.name, fans: j.data.follower };
+      if (j.code === -404) return { ok: false, deleted: true };
+      return { ok: false, err: `code ${j.code}` };
+    },
+  };
+
+  // ---------------------------------------------------------------- 应用状态
+  const app = {
+    cache: {},
+    config: { interval: 1200, autoFans: true, staleDays: 730 },
+    throttle: new Throttle(1200),
+    scanning: false,
+    aborted: false,
+    selfMid: "",
+    rows: [],
+    filter: "zombie",
+    ui: {},
+  };
+
+  const loadState = () => {
+    try { app.cache = JSON.parse(localStorage.getItem(CACHE_KEY) || "{}"); } catch { app.cache = {}; }
+    try { Object.assign(app.config, JSON.parse(localStorage.getItem(CONFIG_KEY) || "{}")); } catch { /* ignore */ }
+  };
+  const saveCache = () => { try { localStorage.setItem(CACHE_KEY, JSON.stringify(app.cache)); } catch { /* ignore */ } };
+
+  const staleWindow = () => Math.max(30, Number(app.config.staleDays) || 730) * 86400;
+
+  const statusOf = (r) => {
+    if (r.deleted) return "deleted";
+    if (r.videoTs === 0 && r.dynTs === 0) return "empty";
+    if (r.videoTs === null && r.dynTs === null) return "error";
+    const win = staleWindow();
+    const vStale = r.videoTs === 0 || (r.videoTs && now() - r.videoTs > win);
+    const dStale = !r.dynTs || now() - r.dynTs > win;
+    if (vStale && dStale) return "zombie";
+    if (vStale && !dStale) return "dynonly";
+    return "alive";
+  };
+
+  const STATUS_TEXT = {
+    deleted: "已注销", zombie: "僵尸号", dynonly: "只发动态", empty: "零内容",
+    error: "查询失败", alive: "正常", pending: "待查",
+  };
+
+  // ---------------------------------------------------------------- 扫描
+  const scan = async () => {
+    if (app.scanning) return;
+    app.scanning = true;
+    app.aborted = false;
+    try {
+      app.selfMid = getCookie("DedeUserID");
+      if (!app.selfMid) throw new Error("没读到登录态（DedeUserID）。请先登录 B站，且在本页刷新一次。");
+      app.throttle.interval = app.config.interval;
+
+      setStatus("正在读取关注列表…");
+      const followings = await api.followings(app.selfMid, (got, total) => {
+        setStatus(`读取关注列表 ${got}/${total || "?"}`);
+        setProgress((total ? got / total : 0) * 0.15);
+      });
+
+      const todo = followings.filter((u) => !app.cache[u.mid]?.checked);
+      setStatus(`共 ${followings.length} 个关注，本次需要查 ${todo.length} 个`);
+      let done = 0, hit = 0;
+      for (const u of followings) {
+        if (app.aborted) break;
+        const mid = String(u.mid);
+        const cached = app.cache[mid];
+        if (cached?.checked) { done++; continue; }
+        const rec = { mid, name: u.uname || "", sign: u.sign || "" };
+
+        if (app.config.autoFans) {
+          const c = await api.card(mid);
+          if (c.deleted) { rec.deleted = true; }
+          else if (c.ok) { rec.name = c.name || rec.name; rec.fans = c.fans; }
+        }
+
+        if (!rec.deleted) {
+          const v = await api.lastVideo(mid);
+          rec.videoTs = v.ok ? v.ts : null;
+          if (!v.ok) rec.err = v.err;
+          const d = await api.lastDynamic(mid);
+          rec.dynTs = d.ok ? d.ts : null;
+          if (!d.ok && !rec.err) rec.err = d.err;
+        } else {
+          rec.videoTs = null; rec.dynTs = null;
+        }
+        rec.checked = true;
+        rec.at = now();
+        app.cache[mid] = rec;
+        done++;
+        hit++;
+        if (hit % 5 === 0) saveCache();
+        const pct = 15 + (done / Math.max(1, followings.length)) * 85;
+        setProgress(pct);
+        setStatus(`扫描中 ${done}/${followings.length} · 已测 ${hit} 个`);
+        if (hit % 10 === 0) renderRows(); // 边扫边出结果
+      }
+      saveCache();
+      setStatus(app.aborted ? "已暂停（进度已保存）" : "扫描完成");
+    } catch (e) {
+      setStatus("出错：" + (e.message || e), true);
+    } finally {
+      app.scanning = false;
+      renderRows();
+      renderStats();
+    }
+  };
+
+  // ---------------------------------------------------------------- 渲染
+  const collectRows = () => {
+    const rows = [];
+    for (const [mid, rec] of Object.entries(app.cache)) {
+      if (!rec.checked) continue;
+      const st = statusOf(rec);
+      rows.push({
+        mid, name: rec.name || mid, fans: rec.fans,
+        videoTs: rec.videoTs, dynTs: rec.dynTs, status: st, err: rec.err,
+        videoDays: days(rec.videoTs), dynDays: days(rec.dynTs),
+      });
+    }
+    const rank = { deleted: 0, zombie: 1, empty: 2, dynonly: 3, error: 4, alive: 5 };
+    rows.sort((a, b) => (rank[a.status] - rank[b.status]) || ((b.videoDays || 0) - (a.videoDays || 0)));
+    return rows;
+  };
+
+  const setStatus = (text, isErr) => {
+    if (!app.ui.status) return;
+    app.ui.status.textContent = text;
+    app.ui.status.style.color = isErr ? "#e5646e" : "#8b98a9";
+  };
+  const setProgress = (pct) => {
+    if (app.ui.bar) app.ui.bar.style.width = Math.max(0, Math.min(100, pct)) + "%";
+  };
+
+  const renderStats = () => {
+    const rows = collectRows();
+    const c = {};
+    for (const r of rows) c[r.status] = (c[r.status] || 0) + 1;
+    if (app.ui.stats) {
+      app.ui.stats.textContent = `共 ${rows.length} 个 · 已注销 ${c.deleted || 0} · 僵尸 ${c.zombie || 0} · ` +
+        `只发动态 ${c.dynonly || 0} · 零内容 ${c.empty || 0} · 正常 ${c.alive || 0}`;
+    }
+    for (const b of app.ui.filters || []) {
+      const k = b.dataset.filter;
+      const n = k === "all" ? rows.length : (c[k] || 0);
+      b.textContent = `${b.dataset.label} ${n}`;
+      b.classList.toggle("on", k === app.filter);
+    }
+  };
+
+  const renderRows = () => {
+    if (!app.ui.tbody) return;
+    const rows = collectRows();
+    const list = app.filter === "all" ? rows : rows.filter((r) => r.status === app.filter);
+    app.ui.tbody.replaceChildren();
+    for (const r of list) {
+      const tr = el("tr", { "data-mid": r.mid });
+      const chk = el("input", { type: "checkbox", class: "bfd-chk" });
+      chk.dataset.mid = r.mid;
+      tr.append(el("td", {}, chk));
+      tr.append(el("td", { class: "bfd-name" }, el("a", {
+        href: `https://space.bilibili.com/${r.mid}`, target: "_blank", rel: "noreferrer",
+      }, r.name)));
+      tr.append(el("td", {}, el("span", { class: `bfd-tag bfd-${r.status}` }, STATUS_TEXT[r.status] || r.status)));
+      tr.append(el("td", {}, r.videoTs ? `${fmtDate(r.videoTs)} (${r.videoDays}天)` : (r.videoTs === 0 ? "无投稿" : "-")));
+      tr.append(el("td", {}, r.dynTs ? `${fmtDate(r.dynTs)} (${r.dynDays}天)` : (r.dynTs === 0 ? "无动态" : "-")));
+      tr.append(el("td", {}, num(r.fans)));
+      tr.append(el("td", {}, el("button", {
+        class: "bfd-btn bfd-mini", onclick: async (e) => {
+          e.target.disabled = true;
+          e.target.textContent = "取关中…";
+          const ok = await api.unfollow(r.mid).catch(() => false);
+          e.target.textContent = ok ? "已取关" : "失败";
+          if (ok) {
+            delete app.cache[r.mid];
+            saveCache();
+            tr.style.opacity = "0.35";
+            renderStats();
+          } else {
+            e.target.disabled = false;
+            setTimeout(() => (e.target.textContent = "取关"), 1500);
+          }
+        },
+      }, "取关")));
+      app.ui.tbody.append(tr);
+    }
+    renderStats();
+  };
+
+  const exportCsv = () => {
+    const rows = collectRows();
+    const head = ["状态", "UID", "昵称", "最近投稿", "最近动态", "粉丝", "主页"];
+    const lines = [head.join(",")];
+    for (const r of rows) {
+      lines.push([
+        STATUS_TEXT[r.status] || r.status, r.mid,
+        `"${String(r.name).replace(/"/g, '""')}"`,
+        r.videoTs ? fmtDate(r.videoTs) : "-",
+        r.dynTs ? fmtDate(r.dynTs) : "-",
+        r.fans ?? "",
+        `https://space.bilibili.com/${r.mid}`,
+      ].join(","));
+    }
+    const blob = new Blob(["\ufeff" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const a = el("a", { href: URL.createObjectURL(blob), download: `bili-follow-${new Date().toISOString().slice(0, 10)}.csv` });
+    document.body.append(a);
+    a.click();
+    a.remove();
+  };
+
+  const batchUnfollow = async () => {
+    const mids = [...document.querySelectorAll(".bfd-chk:checked")].map((c) => c.dataset.mid);
+    if (!mids.length) return alert("先勾选要取关的账号");
+    const names = mids.map((m) => app.cache[m]?.name || m);
+    const preview = names.slice(0, 10).join("、") + (names.length > 10 ? ` 等 ${names.length} 个` : "");
+    if (!confirm(`确定取关这 ${mids.length} 个？\n\n${preview}\n\nB站没有批量撤销，取关后要一个个手动加回来。`)) return;
+    setStatus(`批量取关 0/${mids.length}`);
+    let ok = 0;
+    for (const [i, mid] of mids.entries()) {
+      const success = await api.unfollow(mid).catch(() => false);
+      if (success) { ok++; delete app.cache[mid]; }
+      setStatus(`批量取关 ${i + 1}/${mids.length}（成功 ${ok}）`);
+      setProgress(((i + 1) / mids.length) * 100);
+      await sleep(1500);
+    }
+    saveCache();
+    renderRows();
+    setStatus(`批量取关完成：成功 ${ok}/${mids.length}`);
+    alert(`完成：成功取关 ${ok} 个，失败 ${mids.length - ok} 个`);
+  };
+
+  // ---------------------------------------------------------------- UI
+  const CSS = `
+  .bfd-fab{position:fixed;right:22px;bottom:26px;z-index:2147483000;display:flex;align-items:center;gap:6px;
+    padding:10px 16px;border-radius:999px;background:#fb7299;color:#fff;font:14px/1 system-ui,sans-serif;
+    box-shadow:0 6px 20px rgba(251,114,153,.45);cursor:pointer;border:0;transition:.15s}
+  .bfd-fab:hover{transform:translateY(-1px);filter:brightness(1.05)}
+  .bfd-mask{position:fixed;inset:0;z-index:2147483001;background:rgba(8,12,18,.55);display:flex;
+    align-items:center;justify-content:center;backdrop-filter:blur(2px)}
+  .bfd-panel{width:min(1080px,94vw);max-height:88vh;display:flex;flex-direction:column;overflow:hidden;
+    background:#161b22;color:#e6edf6;border:1px solid #273040;border-radius:16px;
+    font:13px/1.55 "Segoe UI","Microsoft YaHei",system-ui,sans-serif}
+  .bfd-head{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid #273040}
+  .bfd-title{font-size:15px;font-weight:600}
+  .bfd-sub{color:#8b98a9;font-size:12px}
+  .bfd-x{margin-left:auto;border:0;background:transparent;color:#8b98a9;font-size:18px;cursor:pointer}
+  .bfd-x:hover{color:#e5646e}
+  .bfd-body{padding:12px 16px;overflow:auto}
+  .bfd-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+  .bfd-btn{border:1px solid #273040;background:#1c2330;color:#e6edf6;border-radius:8px;
+    padding:7px 13px;cursor:pointer;font:inherit}
+  .bfd-btn:hover{border-color:#4dc9c0;color:#4dc9c0}
+  .bfd-btn.primary{background:#fb7299;border-color:#fb7299;color:#fff}
+  .bfd-btn.primary:hover{filter:brightness(1.06);color:#fff}
+  .bfd-btn.danger{border-color:#5a2a30;color:#e5646e}
+  .bfd-btn.danger:hover{background:#e5646e18}
+  .bfd-btn:disabled{opacity:.5;cursor:not-allowed}
+  .bfd-mini{padding:3px 10px;font-size:12px}
+  .bfd-progress{height:6px;background:#1c2330;border-radius:99px;overflow:hidden;margin-bottom:8px}
+  .bfd-bar{height:100%;width:0;background:linear-gradient(90deg,#4dc9c0,#7aa2f7);transition:width .2s}
+  .bfd-status{color:#8b98a9;font-size:12px;min-height:18px;margin-bottom:8px}
+  .bfd-stats{color:#8b98a9;font-size:12px;margin:6px 0 10px}
+  .bfd-filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .bfd-filters button{border:1px solid #273040;background:transparent;color:#8b98a9;border-radius:99px;
+    padding:4px 12px;font-size:12px;cursor:pointer}
+  .bfd-filters button.on{border-color:#fb7299;color:#fb7299;background:#fb729914}
+  table.bfd-table{width:100%;border-collapse:collapse;font-size:12.5px}
+  .bfd-table th{position:sticky;top:0;background:#161b22;text-align:left;color:#8b98a9;
+    font-weight:500;padding:8px 6px;border-bottom:1px solid #273040;white-space:nowrap}
+  .bfd-table td{padding:7px 6px;border-bottom:1px solid #1f2733;vertical-align:middle}
+  .bfd-table tr:hover td{background:#1a212c}
+  .bfd-name a{color:#e6edf6;text-decoration:none}
+  .bfd-name a:hover{color:#4dc9c0;text-decoration:underline}
+  .bfd-tag{padding:2px 8px;border-radius:99px;font-size:11px;white-space:nowrap}
+  .bfd-deleted{background:#e5646e20;color:#e5646e}
+  .bfd-zombie{background:#f0a35e20;color:#f0a35e}
+  .bfd-dynonly{background:#7aa2f720;color:#7aa2f7}
+  .bfd-empty{background:#8b98a920;color:#8b98a9}
+  .bfd-alive{background:#5ec97a20;color:#5ec97a}
+  .bfd-error{background:#8b98a920;color:#8b98a9}
+  .bfd-foot{padding:10px 16px;border-top:1px solid #273040;display:flex;gap:12px;align-items:center;
+    color:#8b98a9;font-size:12px;flex-wrap:wrap}
+  .bfd-foot label{display:flex;align-items:center;gap:5px;cursor:pointer}
+  .bfd-foot input[type=number]{width:70px;background:#1c2330;border:1px solid #273040;color:#e6edf6;
+    border-radius:6px;padding:3px 6px}
+  `;
+
+  const openPanel = () => {
+    if (app.ui.mask) { app.ui.mask.style.display = "flex"; return; }
+
+    const filters = [
+      ["zombie", "僵尸号"], ["deleted", "已注销"], ["empty", "零内容"],
+      ["dynonly", "只发动态"], ["alive", "正常"], ["all", "全部"],
+    ].map(([k, label]) => {
+      const b = el("button", { "data-filter": k, "data-label": label, onclick: () => {
+        app.filter = k;
+        renderRows();
+        renderStats();
+      } }, label);
+      return b;
+    });
+
+    const tbody = el("tbody");
+    const status = el("div", { class: "bfd-status" }, "准备就绪");
+    const bar = el("div", { class: "bfd-bar" });
+    const statsLine = el("div", { class: "bfd-stats" });
+
+    const panel = el("div", { class: "bfd-panel" },
+      el("div", { class: "bfd-head" },
+        el("div", {},
+          el("div", { class: "bfd-title" }, "🐟 B站关注体检"),
+          el("div", { class: "bfd-sub" }, `v${VERSION} · 纯本地运行，不经过任何服务器 · 请求间隔 ${app.config.interval}ms`)),
+        el("button", { class: "bfd-x", onclick: () => (app.ui.mask.style.display = "none") }, "✕")),
+      el("div", { class: "bfd-body" },
+        el("div", { class: "bfd-progress" }, bar),
+        status,
+        el("div", { class: "bfd-actions" },
+          el("button", { class: "bfd-btn primary", onclick: scan }, "开始 / 继续扫描"),
+          el("button", { class: "bfd-btn", onclick: () => { app.aborted = true; setStatus("正在停止…"); } }, "暂停"),
+          el("button", { class: "bfd-btn", onclick: exportCsv }, "导出 CSV"),
+          el("button", { class: "bfd-btn danger", onclick: batchUnfollow }, "取关勾选"),
+          el("button", { class: "bfd-btn", onclick: () => {
+            if (!confirm("清空本地缓存？已扫的结果要重新扫一遍。")) return;
+            app.cache = {}; saveCache(); renderRows(); renderStats(); setStatus("缓存已清空");
+          } }, "清缓存")),
+        el("div", { class: "bfd-filters" }, ...filters),
+        statsLine,
+        el("table", { class: "bfd-table" },
+          el("thead", {}, el("tr", {},
+            el("th", {}, ""), el("th", {}, "昵称"), el("th", {}, "状态"),
+            el("th", {}, "最近投稿"), el("th", {}, "最近动态"), el("th", {}, "粉丝"), el("th", {}, ""))),
+          tbody)),
+      el("div", { class: "bfd-foot" },
+        el("label", {}, "多久算僵尸 ",
+          el("input", { type: "number", min: "30", step: "30", value: String(app.config.staleDays),
+            onchange: (e) => {
+              app.config.staleDays = Math.max(30, Number(e.target.value) || 730);
+              localStorage.setItem(CONFIG_KEY, JSON.stringify(app.config));
+              renderRows(); renderStats();
+            } }, "天")),
+        el("label", {}, "请求间隔 ",
+          el("input", { type: "number", min: "600", step: "200", value: String(app.config.interval),
+            onchange: (e) => {
+              app.config.interval = Math.max(600, Number(e.target.value) || 1200);
+              app.throttle.interval = app.config.interval;
+              localStorage.setItem(CONFIG_KEY, JSON.stringify(app.config));
+            } }, "ms")),
+        el("label", {}, el("input", { type: "checkbox", checked: app.config.autoFans ? "" : null,
+          onchange: (e) => {
+            app.config.autoFans = e.target.checked;
+            localStorage.setItem(CONFIG_KEY, JSON.stringify(app.config));
+          } }), "顺便取粉丝数（多一次请求）"),
+        el("span", { style: "margin-left:auto" }, "数据只存在这个浏览器里")));
+
+    const mask = el("div", { class: "bfd-mask", onclick: (e) => {
+      if (e.target === mask) mask.style.display = "none";
+    } }, panel);
+
+    document.body.append(mask);
+    app.ui = { mask, panel, tbody, status, bar, statsLine, filters };
+
+    app.throttle.onCooldown = (sec) => setStatus(`被 B站 限流，冷却 ${sec} 秒…`, true);
+    renderRows();
+    renderStats();
+  };
+
+  const mount = () => {
+    loadState();
+    app.throttle.interval = app.config.interval;
+    const fab = el("button", { class: "bfd-fab", title: "扫描你的关注列表，找出僵尸 UP", onclick: openPanel }, "🐟 关注体检");
+    document.body.append(fab);
+    const style = document.createElement("style");
+    style.textContent = CSS;
+    document.head.append(style);
+  };
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount);
+  else mount();
+})();

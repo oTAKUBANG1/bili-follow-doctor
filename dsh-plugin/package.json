@@ -1,0 +1,35 @@
+{
+  "name": "dsh-bili-follow-doctor",
+  "version": "1.0.0",
+  "description": "B站关注体检：扫关注列表，找出已注销和两年没动静的僵尸 UP，出名单、经确认后取关。只走本机网络，凭证不落第三方。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "bilibili",
+    "follow",
+    "cleanup"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "dsh": ">=0.1.7-rc.1",
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
