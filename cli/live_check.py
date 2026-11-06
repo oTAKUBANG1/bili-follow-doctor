@@ -150,6 +150,11 @@ def main():
     changed = 0
     for i, r in enumerate(targets, 1):
         mid = str(r["UID"])
+        if (r.get("互关") or "").strip() == "是":
+            # 互关的人已经由 mutual_mark.py 保护起来，这里不再改判定
+            r["直播状态"] = r.get("直播状态") or "-"
+            r["最近开播"] = r.get("最近开播") or "-"
+            continue
         if mid not in cache:
             roomid, live_now, err = room_of(int(mid), cookie)
             live_status, live_time, title, area, err2 = (None, "", "", "", "")

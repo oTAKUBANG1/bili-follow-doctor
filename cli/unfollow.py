@@ -123,6 +123,8 @@ def main():
     ap.add_argument("--allow-large", action="store_true", help="允许一次超过 100 个")
     ap.add_argument("--include-live", action="store_true",
                     help="连「有直播间 / 正在直播」的账号也一起取关（默认跳过，防止误删主播）")
+    ap.add_argument("--include-mutual", action="store_true",
+                    help="连「互相关注」的账号也一起取关（默认跳过，那是认识的人）")
     args = ap.parse_args()
 
     if not os.path.exists(args.report):
@@ -130,6 +132,7 @@ def main():
 
     rows = []
     live_skipped = 0
+    mutual_skipped = 0
     with open(args.report, "r", encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
             try:
@@ -141,6 +144,9 @@ def main():
             if args.status and args.status not in (r.get("状态") or ""):
                 continue
             live_col = (r.get("直播状态") or "").strip()
+            if not args.include_mutual and (r.get("互关") or "").strip() == "是":
+                mutual_skipped += 1
+                continue
             if not args.include_live and live_col in ("正在直播", "播过"):
                 # 开过直播间的账号可能还在播，默认不取关（要强制就加 --include-live）
                 live_skipped += 1
@@ -171,6 +177,8 @@ def main():
         return
 
     print(f"符合条件 {len(rows)} 个：")
+    if mutual_skipped:
+        print(f"（跳过 {mutual_skipped} 个互相关注的账号；要一起处理加 --include-mutual）")
     if live_skipped:
         print(f"（另有 {live_skipped} 个「有直播间/正在直播」的账号已跳过，要一起处理加 --include-live）")
     print(f"{'UID':<14}{'昵称':<24}{'状态':<14}{'停更天数':<10}{'粉丝'}")

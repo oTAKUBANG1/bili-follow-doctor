@@ -1,4 +1,4 @@
-/**
+﻿/**
  * dsh-bili-follow-doctor —— 主机半端
  * ============================================================================
  * 给 DeepSeek Harness 用的「B站关注体检」插件：扫关注 → 查最近投稿/动态 → 出名单 →
@@ -216,6 +216,7 @@ function saveCache(cache) {
 function statusOf(r, staleDays = 730) {
   const win = Math.max(30, Number(staleDays) || 730) * 86400
   if (r.deleted) return 'deleted'
+  if (r.mutual) return 'mutual'
   if (r.liveNow) return 'live'
   if (r.liveStreamed) return 'streamed'
   if (r.videoTs === 0 && r.dynTs === 0) return 'empty'
@@ -231,7 +232,7 @@ const staleDaysOf = (v) => Math.max(30, Number(v) || 730)
 const STATUS_LABEL = {
   deleted: '已注销', zombie: '僵尸号', dynonly: '只发动态',
   empty: '零内容', error: '查询失败', alive: '正常',
-  live: '正在直播', streamed: '播过（保留）',
+  live: '正在直播', streamed: '播过（保留）', mutual: '互关（保留）',
 }
 
 function fmtDate(ts) {
@@ -357,6 +358,7 @@ export function apply(ctx) {
       for (const [i, u] of batch.entries()) {
         const mid = String(u.mid)
         const rec = { mid, name: u.uname || '', sign: (u.sign || '').slice(0, 40) }
+        rec.mutual = Number(u.attribute) === 6 // attribute=6 就是互相关注
         if ((u.uname || '').includes('已注销')) {
           rec.deleted = true
           deleted += 1
@@ -429,7 +431,7 @@ export function apply(ctx) {
       const sd = staleDaysOf(args.staleDays)
       let rows = Object.values(cache.rows).filter((r) => r.checked)
       if (want !== 'all') rows = rows.filter((r) => statusOf(r, sd) === want)
-      const rank = { deleted: 0, zombie: 1, empty: 2, streamed: 3, live: 4, dynonly: 5, error: 6, alive: 7 }
+      const rank = { deleted: 0, zombie: 1, empty: 2, mutual: 3, streamed: 4, live: 5, dynonly: 6, error: 7, alive: 8 }
       rows.sort((a, b) => (rank[statusOf(a, sd)] - rank[statusOf(b, sd)])
         || ((nowSec() - (b.videoTs || nowSec())) - (nowSec() - (a.videoTs || nowSec()))))
       const offset = Math.max(0, Number(args.offset) || 0)
@@ -457,7 +459,7 @@ export function apply(ctx) {
       ensureDir(OUT_DIR)
       const sd = staleDaysOf(args.staleDays)
       const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '')
-      const rank = { deleted: 0, zombie: 1, empty: 2, streamed: 3, live: 4, dynonly: 5, error: 6, alive: 7 }
+      const rank = { deleted: 0, zombie: 1, empty: 2, mutual: 3, streamed: 4, live: 5, dynonly: 6, error: 7, alive: 8 }
       rows.sort((a, b) => rank[statusOf(a, sd)] - rank[statusOf(b, sd)])
       const counts = {}
       for (const r of rows) counts[statusOf(r, sd)] = (counts[statusOf(r, sd)] || 0) + 1
@@ -476,7 +478,7 @@ export function apply(ctx) {
 
       const md = [`# B站关注体检 ${new Date().toLocaleString('zh-CN')}`, '',
         `共 ${rows.length} 个关注：` + Object.entries(counts).map(([k, v]) => `${STATUS_LABEL[k]} ${v}`).join('，'), '']
-      for (const key of ['deleted', 'zombie', 'empty', 'streamed', 'live', 'dynonly', 'error']) {
+      for (const key of ['deleted', 'zombie', 'empty', 'mutual', 'streamed', 'live', 'dynonly', 'error']) {
         const sub = rows.filter((r) => statusOf(r, sd) === key)
         md.push(`## ${STATUS_LABEL[key]}（${sub.length}）`, '')
         if (!sub.length) { md.push('无', ''); continue }
@@ -498,6 +500,7 @@ export function apply(ctx) {
       mids: { type: 'array', items: { type: 'number' }, description: '要取关的 UID 列表' },
       confirm: { type: 'boolean', description: '必须为 true，表示使用者已经确认这份名单' },
       allowLive: { type: 'boolean', description: 'true = 连正在直播/播过的账号也删（默认 false，防误删主播）' },
+      allowMutual: { type: 'boolean', description: 'true = 连互相关注的账号也删（默认 false，那是认识的人）' },
       intervalMs: { type: 'number', description: '每个取关之间的间隔，默认 1500' },
     },
     async execute(args) {
@@ -510,9 +513,11 @@ export function apply(ctx) {
       const cache = loadCache()
       // 主播保护：正在直播 / 播过的账号默认跳过
       const skippedLive = []
+      const skippedMutual = []
       const targets = mids.filter((mid) => {
         const r = cache.rows[String(mid)]
         if (!r) return true
+        if (!args.allowMutual && statusOf(r) === 'mutual') { skippedMutual.push(mid); return false }
         if (!args.allowLive && statusOf(r) === 'live') { skippedLive.push(mid); return false }
         if (!args.allowLive && statusOf(r) === 'streamed') { skippedLive.push(mid); return false }
         return true
@@ -539,7 +544,7 @@ export function apply(ctx) {
       saveCache(cache)
       const okCount = results.filter((r) => r.ok).length
       return { ok: true, okCount, failCount: results.length - okCount,
-        skippedLive, results }
+        skippedLive, skippedMutual, results }
     },
   })
 

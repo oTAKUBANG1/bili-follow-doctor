@@ -1,4 +1,4 @@
-# B站关注体检（命令行版）
+﻿# B站关注体检（命令行版）
 
 只读扫描 + 可选批量取关。三个脚本，纯标准库，不需要 pip 安装。
 
@@ -6,6 +6,7 @@
 |---|---|
 | `audit.py` | 全量关注 → 最近投稿时间 → CSV/MD |
 | `dynamics_audit.py` | 给"停更"的补查动态，剔除误判 |
+| `mutual_mark.py` | 标出互相关注的人，不参与清理 |
 | `live_check.py` | 补查直播，播过的账号保下来（防误删主播） |
 | `unfollow.py` | 按报表取关（**默认 dry-run**，加 `--yes` 才执行） |
 
@@ -19,7 +20,8 @@ python audit.py --days 730
 python dynamics_audit.py --days 730
 
 # 3) 再查直播，把播过的保下来（B站 不开放上次开播时间，播过的一律保留）
-python live_check.py --report out\follow_final_xxx.csv --days 730
+python mutual_mark.py --report out\follow_final_xxx.csv
+python live_check.py --report out\follow_mutual_xxx.csv --days 730
 
 # 4) 看看会取关谁（不执行；默认跳过「正在直播 / 播过」的账号）
 python unfollow.py --report out\follow_live_xxx.csv --status "2年无任何更新"
@@ -34,6 +36,7 @@ python unfollow.py --report out\follow_live_xxx.csv --status "2年无任何更�
 
 - 默认 **dry-run**：只打印名单（UID/昵称/状态/停更天数/粉丝），不动账号
 - 必须 `--yes` 才真的取关；一次超过 100 个还要 `--allow-large`
+- **互关保护**：报表里「互关 = 是」的行默认跳过，要一起删得加 `--include-mutual`
 - **主播保护**：报表里「直播状态 = 正在直播 / 播过」的行默认跳过，要一起删得加 `--include-live`
 - `--min-days` / `--max-fans` 可以二次过滤（例如只清小号：`--max-fans 1000`）
 - 每 2 秒一个，进度写 `out/unfollow.jsonl`，中断重跑自动跳过已成功的

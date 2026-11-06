@@ -1,4 +1,4 @@
-# dsh-bili-follow-doctor
+﻿# dsh-bili-follow-doctor
 
 DeepSeek Harness 插件版「B站关注体检」：扫关注 → 查最近投稿/动态 → 出名单 → 经确认后逐个取关。
 只走本机网络，凭证存在 `~/.dsh/bili-follow/cred.json`，不经过第三方。

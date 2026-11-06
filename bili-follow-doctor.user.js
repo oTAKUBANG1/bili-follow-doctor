@@ -307,6 +307,7 @@
 
   const statusOf = (r) => {
     if (r.deleted) return "deleted";
+    if (r.mutual) return "mutual";
     if (r.live?.live) return "live";
     if (r.live?.streamed) return "streamed";
     if (r.videoTs === 0 && r.dynTs === 0) return "empty";
@@ -321,7 +322,7 @@
 
   const STATUS_TEXT = {
     deleted: "已注销", zombie: "僵尸号", dynonly: "只发动态", empty: "零内容",
-    error: "查询失败", alive: "正常", live: "正在直播", streamed: "播过",
+    error: "查询失败", alive: "正常", live: "正在直播", streamed: "播过", mutual: "互关",
   };
 
   // ---------------------------------------------------------------- 扫描
@@ -349,6 +350,8 @@
         const cached = app.cache[mid];
         if (cached?.checked) { done++; continue; }
         const rec = { mid, name: u.uname || "", sign: u.sign || "" };
+        // attribute=6 就是互相关注：认识的人，不参与清理
+        rec.mutual = Number(u.attribute) === 6;
 
         if (app.config.autoFans) {
           const c = await api.card(mid);
@@ -407,7 +410,7 @@
         live: rec.live || null,
       });
     }
-    const rank = { deleted: 0, zombie: 1, empty: 2, live: 3, streamed: 4, dynonly: 5, error: 6, alive: 7 };
+    const rank = { deleted: 0, zombie: 1, empty: 2, mutual: 3, live: 4, streamed: 5, dynonly: 6, error: 7, alive: 8 };
     rows.sort((a, b) => (rank[a.status] - rank[b.status]) || ((b.videoDays || 0) - (a.videoDays || 0)));
     return rows;
   };
@@ -427,7 +430,7 @@
     for (const r of rows) c[r.status] = (c[r.status] || 0) + 1;
     if (app.ui.stats) {
       app.ui.stats.textContent = `共 ${rows.length} 个 · 已注销 ${c.deleted || 0} · 僵尸 ${c.zombie || 0} · ` +
-        `主播 ${(c.live || 0) + (c.streamed || 0)} · 只发动态 ${c.dynonly || 0} · 零内容 ${c.empty || 0} · ` +
+        `主播 ${(c.live || 0) + (c.streamed || 0)} · 互关 ${c.mutual || 0} · 只发动态 ${c.dynonly || 0} · 零内容 ${c.empty || 0} · ` +
         `正常 ${c.alive || 0}`;
     }
     for (const b of app.ui.filters || []) {
@@ -505,11 +508,11 @@
   const batchUnfollow = async () => {
     const checked = [...document.querySelectorAll(".bfd-chk:checked")];
     const rowsByMid = new Map(collectRows().map((r) => [String(r.mid), r]));
-    const skipped = checked.filter((c) => ["live", "streamed"].includes(rowsByMid.get(c.dataset.mid)?.status));
+    const skipped = checked.filter((c) => ["live", "streamed", "mutual"].includes(rowsByMid.get(c.dataset.mid)?.status));
     const mids = checked.filter((c) => !skipped.includes(c))
       .map((c) => c.dataset.mid);
     if (skipped.length) {
-      alert(`有 ${skipped.length} 个「正在直播 / 播过」的账号已自动跳过（防止误删主播）。\n要删它们请单独点那一行的取关按钮。`);
+      alert(`有 ${skipped.length} 个「正在直播 / 播过 / 互关」的账号已自动跳过（主播和你认识的人不删）。\n要删它们请单独点那一行的取关按钮。`);
     }
     if (!mids.length) return;
     const names = mids.map((m) => app.cache[m]?.name || m);
@@ -579,6 +582,7 @@
   .bfd-empty{background:#8b98a920;color:#8b98a9}
   .bfd-alive{background:#5ec97a20;color:#5ec97a}
   .bfd-live{background:#a259ff22;color:#b98cff}
+  .bfd-mutual{background:#4dc9c020;color:#4dc9c0}
   .bfd-streamed{background:#a259ff18;color:#9d7cd8}
   .bfd-error{background:#8b98a920;color:#8b98a9}
   .bfd-foot{padding:10px 16px;border-top:1px solid #273040;display:flex;gap:12px;align-items:center;
@@ -592,8 +596,8 @@
     if (app.ui.mask) { app.ui.mask.style.display = "flex"; return; }
 
     const filters = [
-      ["zombie", "僵尸号"], ["live", "主播"], ["deleted", "已注销"], ["empty", "零内容"],
-      ["dynonly", "只发动态"], ["alive", "正常"], ["all", "全部"],
+      ["zombie", "僵尸号"], ["live", "主播"], ["mutual", "互关"], ["deleted", "已注销"],
+      ["empty", "零内容"], ["dynonly", "只发动态"], ["alive", "正常"], ["all", "全部"],
     ].map(([k, label]) => {
       const b = el("button", { "data-filter": k, "data-label": label, onclick: () => {
         app.filter = k;
