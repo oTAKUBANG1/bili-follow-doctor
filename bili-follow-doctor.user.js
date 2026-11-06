@@ -1,7 +1,7 @@
-// ==UserScript==
+﻿// ==UserScript==
 // @name         B站关注体检 · Follow Doctor
 // @namespace    https://github.com/mituan/bili-follow-doctor
-// @version      1.0.0
+// @version      1.1.0
 // @description  扫一遍你的关注列表，标出已注销、两年没更新的僵尸 UP；会开直播的一律保留。可一键导出 CSV，也可逐个取关。纯本地运行，不经过任何服务器。
 // @author       米团
 // @match        https://space.bilibili.com/*
@@ -18,7 +18,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.0.0";
+  const VERSION = "1.1.0";
   const CACHE_KEY = "bfd.cache.v2";
   const CONFIG_KEY = "bfd.config.v1";
   const TWO_YEARS = 730 * 86400;
