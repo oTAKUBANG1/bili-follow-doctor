@@ -22,7 +22,9 @@
     "cordis.patch.yml",
     "README.md",
     "CHANGELOG.md",
-    "LICENSE"
+    "LICENSE",
+    "screenshots.json",
+    "screenshots"
   ],
   "engines": {
     "dsh": ">=0.1.7-rc.1",
