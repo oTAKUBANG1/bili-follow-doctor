@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>B站关注体检 · 可视化</title>
+<link rel="icon" href="brand/favicon.ico">
 <style>
   /* ---------- 深色（默认） ---------- */
   :root{
@@ -30,8 +31,10 @@
        color:var(--txt);font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;
        padding:22px 18px 60px;transition:background .2s,color .2s}
   .wrap{max-width:1200px;margin:0 auto}
-  header{display:flex;align-items:baseline;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+  header{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
   h1{font-size:19px;margin:0}
+  .lockup{height:36px;width:auto;display:block}
+  .tagline{padding-bottom:2px;letter-spacing:.08em}
   .sub{color:var(--dim);font-size:12px}
   .grow{flex:1}
   .btn{border:1px solid var(--line);background:var(--panel2);color:var(--txt);border-radius:9px;
@@ -98,7 +101,8 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>🐟 B站关注体检 · 可视化</h1>
+    <img id="lockup" class="lockup" src="brand/lockup-light.svg" alt="B站关注体检">
+    <span class="sub tagline">数据可视化</span>
     <span class="sub" id="meta">加载中…</span>
     <span class="grow"></span>
     <button class="btn" id="btnTheme" title="切换浅色/深色">🌙 深色</button>
@@ -257,6 +261,8 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&
 function applyTheme(t) {
   document.documentElement.dataset.theme = t;
   el("btnTheme").textContent = t === "light" ? "☀️ 浅色" : "🌙 深色";
+  const lk = document.getElementById("lockup");
+  if (lk) lk.src = "brand/lockup-" + (t === "light" ? "light" : "dark") + ".svg";
   try { localStorage.setItem("bfd.theme", t); } catch {}
   // 图表颜色来自 CSS 变量，换主题后要重画
   if (ctx) { resize(); }
