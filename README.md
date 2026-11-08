@@ -1,4 +1,4 @@
-﻿# B站关注体检 · Follow Doctor
+# B站关注体检 · Follow Doctor
 
 扫一遍你的 B站 关注列表，标出**已注销**和**长期没动静**的僵尸 UP。
 三种形态，都只走本机网络、不经过任何第三方服务器。
@@ -8,6 +8,7 @@
 | 🐟 **油猴脚本** | 一般用户，装完就能用 | [`bili-follow-doctor.user.js`](bili-follow-doctor.user.js) |
 | 🔌 **DSH 插件** | 用 DeepSeek Harness 的人 | [`dsh-plugin/`](dsh-plugin/) |
 | 💻 **命令行** | 想跑在服务器/批量处理 | [`cli/`](cli/) |
+| 📊 **可视化仪表盘** | 想先看「阈值改一改能清多少」 | [`dashboard/`](dashboard/) |
 
 ![界面](screenshot.png)
 
@@ -62,6 +63,11 @@ dsh plugin --profile web add link:$(pwd)/dsh-plugin
 ```
 
 注册 7 个工具（登录 / 扫描 / 列名单 / 报表 / 取关 / 状态）。详见 [`dsh-plugin/README.md`](dsh-plugin/README.md)。
+
+## 可视化仪表盘
+
+[`dashboard/index.html`](dashboard/index.html) 是一个单文件网页：拖动视频/动态两条阈值线，实时看「能清掉几个」。
+深色/浅色主题可切，带演示数据，离线可用。详见 [`dashboard/README.md`](dashboard/README.md)。
 
 ## 隐私
 

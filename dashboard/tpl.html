@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B站关注体检 · 可视化</title>
+<style>
+  /* ---------- 深色（默认） ---------- */
+  :root{
+    --bg:#0d1117; --glow:#1b2a33; --panel:#161b22; --panel2:#1c2330;
+    --line:#273040; --txt:#e6edf6; --dim:#8b98a9; --hover:#1a212c;
+    --accent:#fb7299; --accent-ink:#2a0b14; --accent-soft:#fb729914;
+    --ok:#5ec97a; --warn:#f0a35e; --bad:#e5646e; --live:#b98cff; --mutual:#4dc9c0; --un:#8b98a9;
+    --chart-grid:#202836; --chart-axis:#7c8898; --chart-region:rgba(240,163,94,.07);
+    --c-clean:#f0a35e; --c-un:#8b98a9; --c-live:#b98cff; --c-mutual:#4dc9c0; --c-deleted:#e5646e; --c-ok:#5ec97a;
+    --shadow:none;
+  }
+  /* ---------- 浅色 ---------- */
+  html[data-theme="light"]{
+    --bg:#f5f7fb; --glow:#e7edf7; --panel:#ffffff; --panel2:#eef2f8;
+    --line:#d8dfea; --txt:#1b2330; --dim:#66717f; --hover:#f1f5fa;
+    --accent:#e64f7d; --accent-ink:#ffffff; --accent-soft:#e64f7d14;
+    --ok:#2f9e50; --warn:#c97b1f; --bad:#cf3b4a; --live:#7b4fd6; --mutual:#0f9c93; --un:#7a8494;
+    --chart-grid:#e3e8f0; --chart-axis:#8a94a3; --chart-region:rgba(201,123,31,.10);
+    --c-clean:#c97b1f; --c-un:#7a8494; --c-live:#7b4fd6; --c-mutual:#0f9c93; --c-deleted:#cf3b4a; --c-ok:#2f9e50;
+    --shadow:0 1px 2px rgba(20,30,50,.06);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 500px at 15% -10%,var(--glow) 0%,var(--bg) 60%) fixed;
+       color:var(--txt);font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+       padding:22px 18px 60px;transition:background .2s,color .2s}
+  .wrap{max-width:1200px;margin:0 auto}
+  header{display:flex;align-items:baseline;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+  h1{font-size:19px;margin:0}
+  .sub{color:var(--dim);font-size:12px}
+  .grow{flex:1}
+  .btn{border:1px solid var(--line);background:var(--panel2);color:var(--txt);border-radius:9px;
+       padding:7px 13px;cursor:pointer;font:inherit;font-size:13px;box-shadow:var(--shadow);transition:.15s}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+  .btn.ghost{padding:5px 10px;font-size:12px}
+  .btn.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+  .cards{display:grid;grid-template-columns:repeat(6,1fr);gap:9px;margin-bottom:12px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:10px 13px;box-shadow:var(--shadow)}
+  .card .k{color:var(--dim);font-size:12px}
+  .card .v{font-size:23px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.3}
+  .v.clean{color:var(--warn)} .v.live{color:var(--live)} .v.mutual{color:var(--mutual)}
+  .v.dead{color:var(--bad)} .v.ok{color:var(--ok)} .v.un{color:var(--un)}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:13px 15px;
+         margin-bottom:12px;box-shadow:var(--shadow)}
+  .controls{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end}
+  .ctl{min-width:170px;flex:1}
+  .ctl label{display:flex;justify-content:space-between;color:var(--dim);font-size:12px;margin-bottom:3px}
+  .ctl label b{color:var(--txt);font-size:13px;font-variant-numeric:tabular-nums}
+  input[type=range]{width:100%;accent-color:var(--accent);height:20px}
+  .presets{display:flex;gap:6px;margin:2px 0 10px;flex-wrap:wrap}
+  .toggles{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:var(--dim)}
+  .toggles label{display:flex;gap:5px;align-items:center;cursor:pointer}
+  canvas{width:100%;height:340px;display:block;cursor:crosshair}
+  .chartbox{position:relative}
+  .tip{position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);
+       border-radius:8px;padding:7px 10px;font-size:12px;white-space:nowrap;display:none;z-index:5;
+       color:var(--txt);box-shadow:0 6px 20px rgba(0,0,0,.18)}
+  .legend{display:flex;gap:13px;flex-wrap:wrap;color:var(--dim);font-size:12px;margin-top:8px}
+  .legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}
+  details{margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
+  summary{cursor:pointer;color:var(--dim);font-size:13px}
+  .adv{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px}
+  .adv .ctl{min-width:200px}
+  textarea{width:100%;min-height:48px;background:var(--panel2);border:1px solid var(--line);
+           color:var(--txt);border-radius:8px;padding:7px 9px;font:12px/1.5 ui-monospace,Consolas,monospace;resize:vertical}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{text-align:left;color:var(--dim);font-weight:500;padding:8px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:7px 6px;border-bottom:1px solid var(--line);vertical-align:middle}
+  tr:hover td{background:var(--hover)}
+  .tag{padding:2px 8px;border-radius:99px;font-size:11px;white-space:nowrap}
+  .tag.z{background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--warn)}
+  .tag.l{background:color-mix(in srgb,var(--live) 14%,transparent);color:var(--live)}
+  .tag.m{background:color-mix(in srgb,var(--mutual) 14%,transparent);color:var(--mutual)}
+  .tag.d{background:color-mix(in srgb,var(--bad) 14%,transparent);color:var(--bad)}
+  .tag.u{background:color-mix(in srgb,var(--un) 14%,transparent);color:var(--un)}
+  .muted{color:var(--dim)}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:9px}
+  input[type=search]{background:var(--panel2);border:1px solid var(--line);color:var(--txt);
+       border-radius:9px;padding:7px 12px;font:inherit;min-width:200px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  .chip{border:1px solid var(--line);border-radius:99px;padding:3px 11px;font-size:12px;color:var(--dim)}
+  .chip b{color:var(--txt)}
+  @media(max-width:900px){.cards{grid-template-columns:repeat(3,1fr)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🐟 B站关注体检 · 可视化</h1>
+    <span class="sub" id="meta">加载中…</span>
+    <span class="grow"></span>
+    <button class="btn" id="btnTheme" title="切换浅色/深色">🌙 深色</button>
+    <button class="btn" id="btnImport">导入 CSV</button>
+    <button class="btn" id="btnCopy">复制可清理 UID</button>
+    <button class="btn primary" id="btnExport">导出名单</button>
+    <input type="file" id="file" accept=".csv" hidden>
+  </header>
+
+  <div class="cards">
+    <div class="card"><div class="k">关注总数</div><div class="v" id="cTotal">-</div></div>
+    <div class="card"><div class="k">可清理</div><div class="v clean" id="cClean">-</div></div>
+    <div class="card"><div class="k">待核验</div><div class="v un" id="cUn">-</div></div>
+    <div class="card"><div class="k">播过 · 保留</div><div class="v live" id="cLive">-</div></div>
+    <div class="card"><div class="k">互关 · 保留</div><div class="v mutual" id="cMutual">-</div></div>
+    <div class="card"><div class="k">正常 / 注销</div><div class="v ok" id="cOk">-</div></div>
+  </div>
+
+  <div class="panel">
+    <div class="presets" id="presets">
+      <button class="btn ghost" data-days="180">半年</button>
+      <button class="btn ghost" data-days="365">1 年</button>
+      <button class="btn ghost on" data-days="730">2 年</button>
+      <button class="btn ghost" data-days="1095">3 年</button>
+      <button class="btn ghost" data-days="0">自定义</button>
+    </div>
+
+    <div class="controls">
+      <div class="ctl">
+        <label>视频停更 ≥ <b id="vV">730 天</b></label>
+        <input type="range" id="sV" min="30" max="2200" step="10" value="730">
+      </div>
+      <div class="ctl">
+        <label>动态停更 ≥ <b id="vD">730 天</b></label>
+        <input type="range" id="sD" min="30" max="2200" step="10" value="730">
+      </div>
+      <div class="ctl">
+        <label>粉丝数 ≤ <b id="vMax">不限</b></label>
+        <input type="range" id="sMax" min="0" max="6" step="0.1" value="6">
+      </div>
+      <div class="toggles">
+        <label><input type="checkbox" id="tLive" checked> 播过不删</label>
+        <label><input type="checkbox" id="tMutual" checked> 互关不删</label>
+        <label><input type="checkbox" id="tUn"> 未核验也算可清理</label>
+      </div>
+    </div>
+
+    <details>
+      <summary>高级：粉丝下限 / 白名单 / 强制删除（按 UID）</summary>
+      <div class="adv">
+        <div class="ctl">
+          <label>粉丝数 ≥ <b id="vMin">0</b></label>
+          <input type="range" id="sMin" min="0" max="5" step="0.1" value="0">
+        </div>
+        <div style="flex:2;min-width:240px">
+          <label style="color:var(--dim);font-size:12px">白名单（永不删，UID 逗号或换行分隔）</label>
+          <textarea id="white"></textarea>
+        </div>
+        <div style="flex:2;min-width:240px">
+          <label style="color:var(--dim);font-size:12px">强制删除（无视保护，UID 分隔）</label>
+          <textarea id="force"></textarea>
+        </div>
+      </div>
+    </details>
+
+    <div class="chartbox" style="margin-top:10px">
+      <canvas id="chart"></canvas>
+      <div class="tip" id="tip"></div>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--c-clean)"></i>可清理</span>
+      <span><i style="background:var(--c-un)"></i>待核验（动态没查过）</span>
+      <span><i style="background:var(--c-live)"></i>播过</span>
+      <span><i style="background:var(--c-mutual)"></i>互关</span>
+      <span><i style="background:var(--c-deleted)"></i>已注销</span>
+      <span><i style="background:var(--c-ok)"></i>正常</span>
+      <span class="muted">横轴＝视频停更天数，纵轴＝动态停更天数；两条虚线能拖</span>
+    </div>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <div class="presets" id="tblFilters" style="margin:0">
+        <button class="btn ghost on" data-k="clean">可清理</button>
+        <button class="btn ghost" data-k="unverified">待核验</button>
+        <button class="btn ghost" data-k="live">播过（直播号）</button>
+        <button class="btn ghost" data-k="mutual">互关</button>
+        <button class="btn ghost" data-k="deleted">已注销</button>
+        <button class="btn ghost" data-k="all">全部</button>
+      </div>
+      <input type="search" id="q" placeholder="按昵称 / UID 筛选…">
+      <span class="sub" id="listMeta"></span>
+    </div>
+    <table>
+      <thead><tr><th>昵称</th><th>UID</th><th>视频停更</th><th>动态停更</th><th>粉丝</th><th>状态</th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const SEED = __DATA__;
+const el = (id) => document.getElementById(id);
+const state = {
+  rows: [], days: { v: 730, d: 730 }, fanMin: 0, fanMax: Infinity,
+  keepLive: true, keepMutual: true, unverifiedOk: false,
+  white: new Set(), force: new Set(), hover: -1, drag: null, tbl: "clean",
+};
+
+const computeAct = (v, d) => (v < 0 && d < 0) ? 3650 : (d < 0 ? v : (v < 0 ? d : Math.min(v, d)));
+function loadRows(raw) {
+  state.rows = raw.map((r) => ({
+    uid: String(r[0]), name: r[1], v: r[2], d: r[3], fans: r[4] || 0,
+    deleted: !!r[5], streamed: !!r[6], mutual: !!r[7],
+    act: computeAct(r[2], r[3]),
+  }));
+}
+
+function classify(r) {
+  if (state.force.has(r.uid)) return "clean";
+  if (r.deleted) return "deleted";
+  if (state.white.has(r.uid)) return "ok";
+  if (r.mutual && state.keepMutual) return "mutual";
+  if (r.streamed && state.keepLive) return "live";
+  const inFan = r.fans >= state.fanMin && r.fans <= state.fanMax;
+  const vOk = r.v < 0 || r.v >= state.days.v;
+  const dKnown = r.d >= 0;
+  const dOk = dKnown ? r.d >= state.days.d : state.unverifiedOk;
+  if (vOk && dOk && inFan) return "clean";
+  if (vOk && !dKnown && inFan) return "unverified";
+  return "ok";
+}
+
+function counts() {
+  const c = { clean: 0, unverified: 0, live: 0, mutual: 0, deleted: 0, ok: 0 };
+  for (const r of state.rows) c[classify(r)]++;
+  return c;
+}
+
+const fmtFans = (n) => n >= 1e8 ? (n / 1e8).toFixed(1) + "亿" : n >= 1e4 ? (n / 1e4).toFixed(1) + "万" : String(n);
+const fmtDays = (d) => d < 0 ? "无" : d + "天";
+const fmtDyn = (d) => d < 0 ? "未查" : d + "天";
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// ---------------- 主题 ----------------
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  el("btnTheme").textContent = t === "light" ? "☀️ 浅色" : "🌙 深色";
+  try { localStorage.setItem("bfd.theme", t); } catch {}
+  // 图表颜色来自 CSS 变量，换主题后要重画
+  if (ctx) { resize(); }
+}
+function initTheme() {
+  let saved = null;
+  const qs = new URLSearchParams(location.search).get("theme");
+  if (qs === "light" || qs === "dark") return applyTheme(qs);
+  try { saved = localStorage.getItem("bfd.theme"); } catch {}
+  const preferLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+  applyTheme(saved || (preferLight ? "light" : "dark"));
+}
+el("btnTheme").addEventListener("click", () => {
+  applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
+  refresh();
+});
+
+// ---------------- 图表 ----------------
+let ctx, W, H, C;
+const PAD = { l: 58, r: 98, t: 14, b: 40 };
+const AX = 2200;
+
+function readColors() {
+  const s = getComputedStyle(document.documentElement);
+  const g = (k) => s.getPropertyValue(k).trim();
+  return {
+    grid: g("--chart-grid"), axis: g("--chart-axis"), region: g("--chart-region"),
+    line: g("--c-clean"), tipRing: g("--txt"),
+    clean: g("--c-clean"), un: g("--c-un"), live: g("--c-live"),
+    mutual: g("--c-mutual"), deleted: g("--c-deleted"), ok: g("--c-ok"),
+  };
+}
+const COLOR = () => ({ clean: C.clean, unverified: C.un, live: C.live, mutual: C.mutual, deleted: C.deleted, ok: C.ok });
+
+const xOf = (v) => PAD.l + (Math.min(Math.max(v, 0), AX) / AX) * (W - PAD.l - PAD.r);
+const yOf = (d) => H - PAD.b - (Math.min(Math.max(d, 0), AX) / AX) * (H - PAD.t - PAD.b);
+const xInv = (x) => Math.round(((x - PAD.l) / (W - PAD.l - PAD.r)) * AX / 10) * 10;
+const yInv = (y) => Math.round(((H - PAD.b - y) / (H - PAD.t - PAD.b)) * AX / 10) * 10;
+
+function resize() {
+  const cv = el("chart"), dpr = window.devicePixelRatio || 1;
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx = cv.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  C = readColors();
+  draw();
+}
+
+function draw() {
+  if (!ctx) return;
+  if (!C) C = readColors();
+  const P = COLOR();
+  ctx.clearRect(0, 0, W, H);
+  ctx.font = "11px system-ui"; ctx.lineWidth = 1;
+
+  // 网格
+  ctx.strokeStyle = C.grid; ctx.fillStyle = C.axis;
+  for (const d of [365, 730, 1095, 1460, 1825, 2190]) {
+    const x = xOf(d);
+    ctx.beginPath(); ctx.moveTo(x, PAD.t); ctx.lineTo(x, H - PAD.b); ctx.stroke();
+    ctx.fillText((d / 365).toFixed(0) + "年", x - 9, H - PAD.b + 16);
+  }
+  for (const d of [365, 730, 1095, 1460, 1825, 2190]) {
+    const y = yOf(d);
+    ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(W - PAD.r, y); ctx.stroke();
+    ctx.fillText((d / 365).toFixed(0) + "年", W - PAD.r + 8, y + 4);
+  }
+  ctx.fillStyle = C.axis;
+  ctx.fillText("视频停更 →", PAD.l + 4, H - 10);
+  ctx.save(); ctx.translate(14, PAD.t + 70); ctx.rotate(-Math.PI / 2); ctx.fillText("← 动态停更", 0, 0); ctx.restore();
+
+  // 可清理区
+  const tx = xOf(state.days.v), ty = yOf(state.days.d);
+  ctx.fillStyle = C.region;
+  ctx.fillRect(tx, PAD.t, W - PAD.r - tx, ty - PAD.t);
+
+  // 点
+  for (const r of state.rows) {
+    const k = classify(r);
+    ctx.beginPath();
+    ctx.fillStyle = P[k];
+    ctx.globalAlpha = k === "ok" ? 0.32 : 0.9;
+    ctx.arc(xOf(r.v), yOf(r.d), k === "clean" ? 3.2 : 2.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // 阈值线
+  ctx.strokeStyle = C.line; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+  ctx.beginPath(); ctx.moveTo(tx, PAD.t); ctx.lineTo(tx, H - PAD.b); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(PAD.l, ty); ctx.lineTo(W - PAD.r, ty); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = C.line; ctx.font = "12px system-ui";
+  ctx.fillText(state.days.v + "天", Math.min(tx + 6, W - PAD.r - 44), PAD.t + 14);
+  ctx.fillText(state.days.d + "天", PAD.l + 6, Math.max(ty - 6, PAD.t + 26));
+
+  // hover 圈
+  if (state.hover >= 0) {
+    const r = state.rows[state.hover];
+    ctx.beginPath(); ctx.strokeStyle = C.tipRing; ctx.lineWidth = 1.5;
+    ctx.arc(xOf(r.v), yOf(r.d), 5.5, 0, Math.PI * 2); ctx.stroke();
+  }
+}
+
+// ---------------- 交互 ----------------
+el("chart").addEventListener("mousedown", (e) => {
+  const rect = e.target.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  if (Math.abs(x - xOf(state.days.v)) < 10) { state.drag = "v"; e.preventDefault(); }
+  else if (Math.abs(y - yOf(state.days.d)) < 10) { state.drag = "d"; e.preventDefault(); }
+});
+
+window.addEventListener("mousemove", (e) => {
+  const cv = el("chart"), rect = cv.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  if (x < 0 || y < 0 || x > rect.width || y > rect.height) { el("tip").style.display = "none"; return; }
+  if (state.drag) {
+    if (state.drag === "v") {
+      state.days.v = Math.max(30, Math.min(AX, xInv(x)));
+      el("sV").value = state.days.v; el("vV").textContent = state.days.v + " 天";
+    } else {
+      state.days.d = Math.max(30, Math.min(AX, yInv(y)));
+      el("sD").value = state.days.d; el("vD").textContent = state.days.d + " 天";
+    }
+    refresh(); return;
+  }
+  let best = -1, bestD = 90;
+  state.rows.forEach((r, i) => {
+    const dist = Math.hypot(xOf(r.v) - x, yOf(r.d) - y);
+    if (dist < bestD) { bestD = dist; best = i; }
+  });
+  const tip = el("tip");
+  if (best >= 0 && bestD < 14) {
+    const r = state.rows[best];
+    state.hover = best;
+    tip.innerHTML = `<b>${esc(r.name)}</b> <span class="muted">${r.uid}</span><br>` +
+      `视频 ${fmtDays(r.v)} · 动态 ${fmtDyn(r.d)}<br>` +
+      `粉丝 ${fmtFans(r.fans)}${r.streamed ? " · 播过" : ""}${r.mutual ? " · 互关" : ""}`;
+    tip.style.display = "block";
+    tip.style.left = Math.min(x + 14, rect.width - 210) + "px";
+    tip.style.top = Math.max(4, y - 52) + "px";
+  } else { state.hover = -1; tip.style.display = "none"; }
+  draw();
+});
+window.addEventListener("mouseup", () => { state.drag = null; });
+
+// ---------------- 列表 ----------------
+function refresh() {
+  const c = counts();
+  el("cTotal").textContent = state.rows.length;
+  el("cClean").textContent = c.clean;
+  el("cUn").textContent = c.unverified;
+  el("cLive").textContent = c.live;
+  el("cMutual").textContent = c.mutual;
+  el("cOk").textContent = c.ok + " / " + c.deleted;
+  el("chips").innerHTML = ["≤1000 粉", "1001–1万", "1万+"].map((label, i) => {
+    const [lo, hi] = i === 0 ? [0, 1000] : i === 1 ? [1001, 10000] : [10001, Infinity];
+    const n = state.rows.filter((r) => classify(r) === "clean" && r.fans >= lo && r.fans <= hi).length;
+    return `<span class="chip">${label}：<b>${n}</b></span>`;
+  }).join("");
+  draw(); renderTable();
+}
+
+function renderTable() {
+  const q = el("q").value.trim().toLowerCase();
+  const k = state.tbl;
+  const list = state.rows
+    .filter((r) => (k === "all" ? true : classify(r) === k)
+      && (!q || r.name.toLowerCase().includes(q) || r.uid.includes(q)))
+    .sort((a, b) => b.act - a.act);
+  const c = counts();
+  el("listMeta").textContent = k === "all" ? `共 ${state.rows.length} 条`
+    : `${({ clean: "可清理", unverified: "待核验", live: "播过", mutual: "互关", deleted: "已注销" })[k]} ${c[k]}`;
+  const TAG = {
+    clean: '<span class="tag z">可清理</span>', unverified: '<span class="tag u">待核验</span>',
+    live: '<span class="tag l">播过</span>', mutual: '<span class="tag m">互关</span>',
+    deleted: '<span class="tag d">已注销</span>', ok: '<span class="tag u">正常</span>',
+  };
+  el("tbody").innerHTML = list.slice(0, 400).map((r) => `<tr>
+      <td>${esc(r.name)}</td><td class="muted">${r.uid}</td>
+      <td>${fmtDays(r.v)}</td><td>${fmtDyn(r.d)}</td><td>${fmtFans(r.fans)}</td>
+      <td>${TAG[classify(r)] || ""}</td></tr>`).join("")
+    || `<tr><td colspan="6" class="muted">没有符合条件的账号</td></tr>`;
+}
+
+// ---------------- 控件 ----------------
+el("sV").addEventListener("input", (e) => { state.days.v = +e.target.value; el("vV").textContent = state.days.v + " 天"; refresh(); });
+el("sD").addEventListener("input", (e) => { state.days.d = +e.target.value; el("vD").textContent = state.days.d + " 天"; refresh(); });
+el("sMax").addEventListener("input", (e) => {
+  const v = +e.target.value;
+  state.fanMax = v >= 6 ? Infinity : Math.round(Math.pow(10, v));
+  el("vMax").textContent = state.fanMax === Infinity ? "不限" : fmtFans(state.fanMax);
+  refresh();
+});
+el("sMin").addEventListener("input", (e) => {
+  const v = +e.target.value;
+  state.fanMin = v <= 0 ? 0 : Math.round(Math.pow(10, v));
+  el("vMin").textContent = fmtFans(state.fanMin);
+  refresh();
+});
+el("tLive").addEventListener("change", (e) => { state.keepLive = e.target.checked; refresh(); });
+el("tMutual").addEventListener("change", (e) => { state.keepMutual = e.target.checked; refresh(); });
+el("tUn").addEventListener("change", (e) => { state.unverifiedOk = e.target.checked; refresh(); });
+el("q").addEventListener("input", renderTable);
+
+const parseIds = (s) => new Set(s.split(/[\s,，]+/).map((x) => x.trim()).filter(Boolean));
+el("white").addEventListener("input", (e) => { state.white = parseIds(e.target.value); refresh(); });
+el("force").addEventListener("input", (e) => { state.force = parseIds(e.target.value); refresh(); });
+
+el("tblFilters").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-k]");
+  if (!b) return;
+  [...el("tblFilters").children].forEach((x) => x.classList.toggle("on", x === b));
+  state.tbl = b.dataset.k;
+  renderTable();
+});
+
+el("presets").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-days]");
+  if (!b) return;
+  [...el("presets").children].forEach((x) => x.classList.toggle("on", x === b));
+  const d = +b.dataset.days;
+  if (!d) return;
+  state.days.v = state.days.d = d;
+  el("sV").value = d; el("sD").value = d;
+  el("vV").textContent = d + " 天"; el("vD").textContent = d + " 天";
+  refresh();
+});
+
+// ---------------- 导出 / 导入 ----------------
+const cleanRows = () => state.rows.filter((r) => classify(r) === "clean").sort((a, b) => b.act - a.act);
+
+el("btnExport").addEventListener("click", () => {
+  const list = cleanRows();
+  const head = "UID,昵称,视频停更天数,动态停更天数,粉丝\n";
+  const body = list.map((r) => `${r.uid},"${r.name.replace(/"/g, '""')}",${r.v},${r.d},${r.fans}`).join("\n");
+  const blob = new Blob(["\ufeff" + head + body], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `可清理_${state.days.v}天_${list.length}个.csv`;
+  a.click(); a.remove();
+});
+
+el("btnCopy").addEventListener("click", async () => {
+  const ids = cleanRows().map((r) => r.uid).join(",");
+  try { await navigator.clipboard.writeText(ids); el("btnCopy").textContent = `已复制 ${cleanRows().length} 个`; }
+  catch { el("btnCopy").textContent = "复制失败"; }
+  setTimeout(() => (el("btnCopy").textContent = "复制可清理 UID"), 1600);
+});
+
+el("btnImport").addEventListener("click", () => el("file").click());
+el("file").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const text = (await f.text()).replace(/^\uFEFF/, "");
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  const head = lines[0].split(",");
+  const idx = (n) => head.indexOf(n);
+  const today = new Date().setHours(0, 0, 0, 0);
+  const daysAgo = (s) => {
+    const v = (s || "").trim();
+    if (!v) return -1;
+    const t = Date.parse(v + "T00:00:00");
+    return Number.isFinite(t) ? Math.floor((today - t) / 86400000) : -1;
+  };
+  const raw = lines.slice(1).map((l) => {
+    const c = l.split(",");
+    const live = (c[idx("直播状态")] || "").trim();
+    return [
+      c[idx("UID")] || "",
+      (c[idx("昵称")] || "").replace(/"/g, ""),
+      daysAgo(c[idx("最近投稿")]),
+      daysAgo(c[idx("最近动态")]),
+      Number(c[idx("粉丝数")] || 0) || 0,
+      (c[idx("状态")] || "").includes("已注销") ? 1 : 0,
+      live === "播过" || live === "正在直播" ? 1 : 0,
+      (c[idx("互关")] || "").trim() === "是" ? 1 : 0,
+    ];
+  });
+  loadRows(raw);
+  el("meta").textContent = `已导入 ${raw.length} 条 · ${f.name}`;
+  refresh();
+});
+
+// ---------------- 启动 ----------------
+initTheme();
+loadRows(SEED);
+const deep = location.hash.replace("#", "");
+if (["clean", "unverified", "live", "mutual", "deleted", "all"].includes(deep)) {
+  state.tbl = deep;
+  [...el("tblFilters").children].forEach((x) => x.classList.toggle("on", x.dataset.k === deep));
+}
+el("meta").textContent = `内置数据 ${state.rows.length} 条（2026-11-06 体检结果）`;
+window.addEventListener("resize", resize);
+resize(); refresh();
+</script>
+</body>
+</html>
