@@ -55,7 +55,13 @@
   input[type=range]{width:100%;accent-color:var(--accent);height:20px}
   .presets{display:flex;gap:6px;margin:2px 0 10px;flex-wrap:wrap}
   .toggles{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:var(--dim)}
-  .toggles label{display:flex;gap:5px;align-items:center;cursor:pointer}
+  .toggles label{display:flex;gap:5px;align-items:center;cursor:pointer;border-bottom:1px dotted transparent}
+  .toggles label:hover{color:var(--txt);border-bottom-color:var(--dim)}
+  .q{display:inline-grid;place-items:center;width:14px;height:14px;border-radius:50%;
+     background:var(--panel2);border:1px solid var(--line);color:var(--dim);font-size:10px;line-height:1}
+  #yearsInput{width:74px;background:var(--panel2);border:1px solid var(--line);color:var(--txt);
+     border-radius:8px;padding:4px 8px;font:13px/1.4 inherit}
+  #customHint{color:var(--warn)}
   canvas{width:100%;height:340px;display:block;cursor:crosshair}
   .chartbox{position:relative}
   .tip{position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);
@@ -113,30 +119,39 @@
 
   <div class="panel">
     <div class="presets" id="presets">
-      <button class="btn ghost" data-days="180">半年</button>
-      <button class="btn ghost" data-days="365">1 年</button>
-      <button class="btn ghost on" data-days="730">2 年</button>
-      <button class="btn ghost" data-days="1095">3 年</button>
-      <button class="btn ghost" data-days="0">自定义</button>
+      <button class="btn ghost" data-days="180" title="半年：视频和动态都停更 180 天以上，才算僵尸号">半年</button>
+      <button class="btn ghost" data-days="365" title="1 年：视频和动态都停更 365 天以上，才算僵尸号">1 年</button>
+      <button class="btn ghost on" data-days="730" title="2 年（默认）：视频和动态都停更 730 天以上，才算僵尸号">2 年</button>
+      <button class="btn ghost" data-days="1095" title="3 年：更保守，只清彻底不动的">3 年</button>
+      <button class="btn ghost" data-days="0" title="自定义：自己填年数（支持 0.5），填完点「应用」">自定义</button>
+      <span id="customBox" style="display:none;align-items:center;gap:6px">
+        <input id="yearsInput" type="number" min="0.5" max="6" step="0.5" value="2">
+        <span class="sub">年</span>
+        <button class="btn ghost" id="applyYears">应用</button>
+        <span class="sub" id="customHint"></span>
+      </span>
     </div>
 
     <div class="controls">
       <div class="ctl">
         <label>视频停更 ≥ <b id="vV">730 天</b></label>
-        <input type="range" id="sV" min="30" max="2200" step="10" value="730">
+        <input type="range" id="sV" min="30" max="730" step="10" value="730" title="视频停更多少天算停更；范围由上面的预设决定">
       </div>
       <div class="ctl">
         <label>动态停更 ≥ <b id="vD">730 天</b></label>
-        <input type="range" id="sD" min="30" max="2200" step="10" value="730">
+        <input type="range" id="sD" min="30" max="730" step="10" value="730" title="动态停更多少天算停更；范围由上面的预设决定">
       </div>
       <div class="ctl">
         <label>粉丝数 ≤ <b id="vMax">不限</b></label>
         <input type="range" id="sMax" min="0" max="6" step="0.1" value="6">
       </div>
       <div class="toggles">
-        <label><input type="checkbox" id="tLive" checked> 播过不删</label>
-        <label><input type="checkbox" id="tMutual" checked> 互关不删</label>
-        <label><input type="checkbox" id="tUn"> 未核验也算可清理</label>
+        <label title="开过直播间、播过内容的账号不参与自动清理。取消勾选后，他们会被算进可清理区（不建议）。">
+          <input type="checkbox" id="tLive" checked> 播过不删 <span class="q">?</span></label>
+        <label title="和你互相关注的人不参与自动清理——那是认识的人。取消勾选后他们会进可清理区。">
+          <input type="checkbox" id="tMutual" checked> 互关不删 <span class="q">?</span></label>
+        <label title="动态没查过的账号没有证据，默认放进「待核验」不算可清理。勾上后按视频停更时间来判，会清得更激进。">
+          <input type="checkbox" id="tUn"> 未核验也算可清理 <span class="q">?</span></label>
       </div>
     </div>
 
@@ -428,8 +443,8 @@ function renderTable() {
 }
 
 // ---------------- 控件 ----------------
-el("sV").addEventListener("input", (e) => { state.days.v = +e.target.value; el("vV").textContent = state.days.v + " 天"; refresh(); });
-el("sD").addEventListener("input", (e) => { state.days.d = +e.target.value; el("vD").textContent = state.days.d + " 天"; refresh(); });
+el("sV").addEventListener("input", (e) => { state.days.v = +e.target.value; showDays(); refresh(); });
+el("sD").addEventListener("input", (e) => { state.days.d = +e.target.value; showDays(); refresh(); });
 el("sMax").addEventListener("input", (e) => {
   const v = +e.target.value;
   state.fanMax = v >= 6 ? Infinity : Math.round(Math.pow(10, v));
@@ -459,16 +474,58 @@ el("tblFilters").addEventListener("click", (e) => {
   renderTable();
 });
 
-el("presets").addEventListener("click", (e) => {
-  const b = e.target.closest("button[data-days]");
-  if (!b) return;
-  [...el("presets").children].forEach((x) => x.classList.toggle("on", x === b));
-  const d = +b.dataset.days;
-  if (!d) return;
+// 把两条阈值设成同一个值，并更新滑杆范围
+function setThreshold(days, max) {
+  const m = Math.max(30, max);
+  el("sV").max = m; el("sD").max = m;
+  const d = Math.max(30, Math.min(days, m));
   state.days.v = state.days.d = d;
   el("sV").value = d; el("sD").value = d;
-  el("vV").textContent = d + " 天"; el("vD").textContent = d + " 天";
+  showDays();
   refresh();
+}
+function showDays() {
+  const f = (d) => (d >= 365 ? `${d} 天（${(d / 365).toFixed(1)} 年）` : `${d} 天`);
+  el("vV").textContent = f(state.days.v);
+  el("vD").textContent = f(state.days.d);
+}
+
+el("presets").addEventListener("click", (e) => {
+  // 自定义：展开年数输入框并提示
+  if (e.target.closest("button[data-days='0']")) {
+    [...el("presets").querySelectorAll("button[data-days]")].forEach((x) => x.classList.toggle("on", +x.dataset.days === 0));
+    const box = el("customBox");
+    box.style.display = "inline-flex";
+    el("sV").max = 2200; el("sD").max = 2200;
+    el("yearsInput").value = (state.days.v / 365).toFixed(1);
+    el("yearsInput").focus();
+    el("yearsInput").select();
+    el("customHint").textContent = "填年数（0.5 的倍数），点「应用」生效";
+    return;
+  }
+  const b = e.target.closest("button[data-days]");
+  if (!b) return;
+  [...el("presets").querySelectorAll("button[data-days]")].forEach((x) => x.classList.toggle("on", x === b));
+  el("customBox").style.display = "none";
+  const d = +b.dataset.days;
+  // 滑杆范围 = 预设天数（选 1 年就只能拖到 365）
+  setThreshold(d, d);
+});
+
+el("applyYears").addEventListener("click", () => {
+  let y = parseFloat(el("yearsInput").value);
+  if (!Number.isFinite(y) || y <= 0) {
+    el("customHint").textContent = "请输入大于 0 的年数";
+    return;
+  }
+  y = Math.min(6, Math.max(0.5, Math.round(y * 2) / 2));
+  const days = Math.round(y * 365);
+  el("yearsInput").value = y.toFixed(1);
+  el("customHint").textContent = `已设为 ${y} 年 = ${days} 天`;
+  setThreshold(days, 2200);
+});
+el("yearsInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") el("applyYears").click();
 });
 
 // ---------------- 导出 / 导入 ----------------
