@@ -966,12 +966,13 @@
       onclick: () => switchTab(k),
     }, k === "follow" ? "关注体检" : "收藏夹体检"));
 
-    const switchTab = (k) => {
+    // 用函数声明而不是 const 箭头函数：会被提升，不依赖它在文件里的位置
+    function switchTab(k) {
       app.tab = k;
       followPane.style.display = k === "follow" ? "" : "none";
       favPane.style.display = k === "fav" ? "" : "none";
       for (const b of tabBtns) b.classList.toggle("on", b.dataset.tab === k);
-    };
+    }
 
     const panel = el("div", { class: "bfd-panel" },
       el("div", { class: "bfd-head" },
