@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         B站关注体检 · Follow Doctor
+// @name         B站体检 · Follow & Fav Doctor
 // @namespace    https://github.com/mituan/bili-follow-doctor
-// @version      1.3.0
-// @description  扫一遍你的关注列表，标出已注销、两年没更新的僵尸 UP；会开直播的一律保留。带状态分布图和停更时长分布图，可一键导出 CSV，也可逐个取关。纯本地运行，不经过任何服务器。
+// @version      1.4.0
+// @description  两个体检合在一个面板：① 关注列表——标出已注销和长期不更新的僵尸 UP，播过直播的保留；② 收藏夹——找出已失效的视频，一键清理。纯本地运行，不经过任何服务器。
 // @author       米团
 // @match        *://space.bilibili.com/*
 // @match        *://www.bilibili.com/*
@@ -25,7 +25,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.3.0";
+  const VERSION = "1.4.0";
   const CACHE_KEY = "bfd.cache.v2";
   const CONFIG_KEY = "bfd.config.v1";
   const TWO_YEARS = 730 * 86400;
@@ -257,6 +257,27 @@
       }
       return out;
     },
+    // POST：收藏夹清理这类写操作用
+    async post(path, params = {}, tries = 3) {
+      const url = "https://api.bilibili.com" + path;
+      const body = new URLSearchParams(params).toString();
+      for (let i = 0; i < tries; i++) {
+        await app.throttleWeb.wait();
+        let r;
+        try {
+          r = await request(url, {
+            method: "POST",
+            headers: { Referer: location.href, "Content-Type": "application/x-www-form-urlencoded" },
+            body,
+          });
+        } catch (e) { if (i === tries - 1) throw e; await sleep(2000); continue; }
+        app.throttleWeb.hit();
+        if (r.status === 412 || r.status === 429) { app.throttleWeb.cool(60); continue; }
+        if (!r.json) throw new Error("返回不是 JSON（HTTP " + r.status + "）");
+        return r.json;
+      }
+      throw new Error("重试耗尽");
+    },
     async unfollow(mid) {
       const j = await this.web("/x/relation/modify", {
         fid: mid, act: 2, re_src: 11, csrf: getCookie("bili_jct"),
@@ -303,6 +324,9 @@
     throttle: new Throttle(1200), // 兼容旧引用，实际用上面两个
     scanning: false,
     aborted: false,
+    // 收藏夹体检的状态（跟关注体检分开，但共用同一套凭证和限流池）
+    tab: "follow",
+    fav: { folders: [], scanning: false, aborted: false, at: 0 },
     selfMid: "",
     rows: [],
     filter: "zombie",
@@ -724,7 +748,150 @@
   .bfd-bar-fill{height:100%;background:linear-gradient(90deg,#f0a35e,#e5646e);border-radius:99px;transition:width .2s}
   .bfd-bar-n{width:26px;text-align:right;color:#c9d1d9;font-weight:500;flex:none}
   .bfd-note{font-size:11px;color:#8b98a9;margin-top:2px}
+  /* 两个功能共用一个面板：顶部页签切换 */
+  .bfd-tabs{display:flex;gap:4px;padding:3px;border-radius:10px;background:#1c2330;margin-bottom:10px}
+  .bfd-tab{flex:1;padding:7px 10px;border:0;border-radius:8px;background:transparent;color:#8b98a9;
+    font:inherit;font-size:13px;cursor:pointer}
+  .bfd-tab:hover{color:#e6edf6}
+  .bfd-tab.on{background:#161b22;color:#e6edf6;font-weight:600}
+  .bfd-folder{display:flex;align-items:center;gap:10px;padding:8px 6px;border-bottom:1px solid #1f2733}
+  .bfd-folder:last-child{border-bottom:0}
+  .bfd-folder-n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bfd-folder-d{color:#e5646e;font-size:12px;flex:none;font-variant-numeric:tabular-nums}
+  .bfd-fav-list{max-height:min(52vh,460px);overflow:auto;border:1px solid #273040;border-radius:10px;padding:2px 8px}
   `;
+
+  // ---------------------------------------------------------------- 收藏夹体检
+  // 跟关注体检共用凭证 / 限速池 / 面板，只是数据源和动作不一样。
+  const FAV_KEY = "bfd.fav.v1";
+
+  const favApi = {
+    async folders() {
+      const j = await api.web("/x/v3/fav/folder/created/list-all", { up_mid: app.selfMid });
+      if (j.code !== 0) throw new Error(`收藏夹列表失败：code ${j.code} ${j.message || ""}`);
+      return Array.isArray(j.data) ? j.data : (j.data?.list || []);
+    },
+    page: (mediaId, pn) => api.web("/x/v3/fav/resource/list",
+      { media_id: mediaId, pn, ps: 20, platform: "web" }),
+    // 清空某个收藏夹里的失效内容（B站 官方接口）
+    clean: (mediaId) => api.post("/x/v3/fav/resource/clean",
+      { media_id: mediaId, platform: "web", csrf: getCookie("bili_jct") }),
+  };
+
+  const loadFavState = () => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(FAV_KEY) || "{}");
+      if (Array.isArray(raw.folders)) app.fav.folders = raw.folders;
+      app.fav.at = raw.at || 0;
+    } catch { /* 坏数据就当没有 */ }
+  };
+  const saveFavState = () => {
+    app.fav.at = now();
+    try {
+      localStorage.setItem(FAV_KEY, JSON.stringify({ folders: app.fav.folders, at: app.fav.at }));
+    } catch { /* 存不下就算了 */ }
+  };
+
+  const setFavStatus = (text, isErr) => {
+    if (!app.ui.favStatus) return;
+    app.ui.favStatus.textContent = text;
+    app.ui.favStatus.style.color = isErr ? "#e5646e" : "#8b98a9";
+  };
+
+  const scanFav = async () => {
+    if (app.fav.scanning) return;
+    app.fav.scanning = true;
+    app.fav.aborted = false;
+    try {
+      app.selfMid = getCookie("DedeUserID");
+      if (!app.selfMid) throw new Error("没读到登录态（DedeUserID），请先登录 B站 并刷新");
+      setFavStatus("正在读取收藏夹列表…");
+      const folders = await favApi.folders();
+      app.fav.folders = folders.map((f) => ({
+        id: f.id, title: f.title, count: f.media_count, dead: 0, scanned: 0, done: false,
+      }));
+      renderFav();
+
+      for (const f of app.fav.folders) {
+        if (app.fav.aborted) break;
+        let pn = 1, dead = 0, scanned = 0, more = true;
+        while (more && pn <= 400) {
+          if (app.fav.aborted) break;
+          const j = await favApi.page(f.id, pn);
+          if (j.code !== 0) {
+            setFavStatus(`「${f.title}」第 ${pn} 页失败：code ${j.code} ${j.message || ""}`, true);
+            break;
+          }
+          for (const m of (j.data?.medias || [])) {
+            scanned += 1;
+            if (m.title === "已失效视频" || (m.attr & 1) === 1) dead += 1;
+          }
+          more = Boolean(j.data?.has_more);
+          pn += 1;
+          f.dead = dead;
+          f.scanned = scanned;
+          renderFav();
+          setFavStatus(`扫描中：${f.title} ${scanned}/${f.count || "?"}`);
+          // 每页间隔比关注体检长一点：收藏夹接口翻上百页就会 412
+          if (pn % 60 === 0) await sleep(25000);
+          else await sleep(Math.max(400, app.config.interval / 2));
+        }
+        f.done = true;
+        saveFavState();
+        renderFav();
+      }
+      setFavStatus(app.fav.aborted ? "已暂停（进度已保存）" : "扫描完成");
+    } catch (e) {
+      setFavStatus("出错：" + (e.message || e), true);
+    } finally {
+      app.fav.scanning = false;
+      renderFav();
+    }
+  };
+
+  const cleanFav = async (f) => {
+    if (!f.dead) return;
+    if (!confirm(`清空「${f.title}」里的 ${f.dead} 个失效视频？\n\nB站 没有批量恢复，删了要一个个手动加回来。`)) return;
+    setFavStatus(`正在清理「${f.title}」…`);
+    const j = await favApi.clean(f.id).catch((e) => ({ code: -1, message: String(e.message || e) }));
+    if (j.code === 0) {
+      f.dead = 0;
+      saveFavState();
+      renderFav();
+      setFavStatus(`✅ 「${f.title}」已清理`);
+    } else {
+      setFavStatus(`❌ 「${f.title}」清理失败：code ${j.code} ${j.message || ""}`, true);
+    }
+  };
+
+  const renderFav = () => {
+    if (!app.ui.favList) return;
+    const list = app.fav.folders || [];
+    app.ui.favList.replaceChildren();
+    if (!list.length) {
+      app.ui.favList.append(el("div", { class: "bfd-note", style: "padding:14px 6px" },
+        "还没扫描过。点上面的「扫描收藏夹」。"));
+      if (app.ui.favSummary) app.ui.favSummary.textContent = "";
+      return;
+    }
+    const totalDead = list.reduce((s, f) => s + f.dead, 0);
+    const totalScanned = list.reduce((s, f) => s + (f.scanned || 0), 0);
+    if (app.ui.favSummary) {
+      app.ui.favSummary.textContent = `${list.length} 个收藏夹 · 已扫 ${totalScanned} 个视频 · `
+        + (totalDead ? `${totalDead} 个失效` : "没有失效的");
+    }
+    for (const f of list) {
+      const btn = el("button", {
+        class: "bfd-btn bfd-mini danger",
+        disabled: f.dead ? null : "1",
+        onclick: () => cleanFav(f),
+      }, f.dead ? `清理 ${f.dead}` : "干净");
+      app.ui.favList.append(el("div", { class: "bfd-folder" },
+        el("span", { class: "bfd-folder-n", title: f.title }, f.title),
+        el("span", { class: "bfd-folder-d" }, `${f.dead} / ${f.scanned || f.count}`),
+        btn));
+    }
+  };
 
   const openPanel = () => {
     if (app.ui.mask) { app.ui.mask.style.display = "flex"; return; }
@@ -747,32 +914,75 @@
     const statsLine = el("div", { class: "bfd-stats" });
     const charts = el("div", { class: "bfd-charts" });
 
+    // ── 关注体检这一页（原来的内容原封不动搬进来）
+    const followPane = el("div", {},
+      el("div", { class: "bfd-progress" }, bar),
+      status,
+      el("div", { class: "bfd-actions" },
+        el("button", { class: "bfd-btn primary", onclick: scan }, "开始 / 继续扫描"),
+        el("button", { class: "bfd-btn", onclick: () => { app.aborted = true; setStatus("正在停止…"); } }, "暂停"),
+        el("button", { class: "bfd-btn", onclick: exportCsv }, "导出 CSV"),
+        el("button", { class: "bfd-btn danger", onclick: batchUnfollow }, "取关勾选"),
+        el("button", { class: "bfd-btn", onclick: () => {
+          if (!confirm("清空本地缓存？已扫的结果要重新扫一遍。")) return;
+          app.cache = {}; saveCache(); renderRows(); renderStats(); setStatus("缓存已清空");
+        } }, "清缓存")),
+      el("div", { class: "bfd-filters" }, ...filters),
+      charts,
+      statsLine,
+      el("table", { class: "bfd-table" },
+        el("thead", {}, el("tr", {},
+          el("th", {}, ""), el("th", {}, "昵称"), el("th", {}, "状态"),
+          el("th", {}, "最近投稿"), el("th", {}, "最近动态"), el("th", {}, "粉丝"), el("th", {}, ""))),
+        tbody));
+
+    // ── 收藏夹体检这一页
+    const favStatus = el("div", { class: "bfd-status" }, "准备就绪");
+    const favSummary = el("div", { class: "bfd-stats" });
+    const favList = el("div", { class: "bfd-fav-list" });
+    const favPane = el("div", { style: "display:none" },
+      el("div", { class: "bfd-actions" },
+        el("button", { class: "bfd-btn primary", onclick: scanFav }, "扫描收藏夹"),
+        el("button", { class: "bfd-btn", onclick: () => {
+          app.fav.aborted = true;
+          setFavStatus("正在停止…");
+        } }, "暂停"),
+        el("button", { class: "bfd-btn", onclick: () => {
+          if (!confirm("清空收藏夹扫描结果？")) return;
+          app.fav.folders = [];
+          saveFavState();
+          renderFav();
+        } }, "清结果")),
+      favStatus,
+      favSummary,
+      favList,
+      el("div", { class: "bfd-note", style: "margin-top:8px" },
+        "只有「已失效视频」会被算进来。清理用的是 B站 官方的「清空失效内容」接口，一次清一个收藏夹。"));
+
+    // ── 页签
+    const tabBtns = ["follow", "fav"].map((k) => el("button", {
+      class: "bfd-tab" + (k === app.tab ? " on" : ""),
+      "data-tab": k,
+      onclick: () => switchTab(k),
+    }, k === "follow" ? "关注体检" : "收藏夹体检"));
+
+    const switchTab = (k) => {
+      app.tab = k;
+      followPane.style.display = k === "follow" ? "" : "none";
+      favPane.style.display = k === "fav" ? "" : "none";
+      for (const b of tabBtns) b.classList.toggle("on", b.dataset.tab === k);
+    };
+
     const panel = el("div", { class: "bfd-panel" },
       el("div", { class: "bfd-head" },
         el("div", {},
-          el("div", { class: "bfd-title" }, "🐟 B站关注体检"),
+          el("div", { class: "bfd-title" }, "🐟 B站体检"),
           el("div", { class: "bfd-sub" }, `v${VERSION} · 纯本地运行，不经过任何服务器 · 请求间隔 ${app.config.interval}ms`)),
         el("button", { class: "bfd-x", onclick: () => (app.ui.mask.style.display = "none") }, "✕")),
       el("div", { class: "bfd-body" },
-        el("div", { class: "bfd-progress" }, bar),
-        status,
-        el("div", { class: "bfd-actions" },
-          el("button", { class: "bfd-btn primary", onclick: scan }, "开始 / 继续扫描"),
-          el("button", { class: "bfd-btn", onclick: () => { app.aborted = true; setStatus("正在停止…"); } }, "暂停"),
-          el("button", { class: "bfd-btn", onclick: exportCsv }, "导出 CSV"),
-          el("button", { class: "bfd-btn danger", onclick: batchUnfollow }, "取关勾选"),
-          el("button", { class: "bfd-btn", onclick: () => {
-            if (!confirm("清空本地缓存？已扫的结果要重新扫一遍。")) return;
-            app.cache = {}; saveCache(); renderRows(); renderStats(); setStatus("缓存已清空");
-          } }, "清缓存")),
-        el("div", { class: "bfd-filters" }, ...filters),
-        charts,
-        statsLine,
-        el("table", { class: "bfd-table" },
-          el("thead", {}, el("tr", {},
-            el("th", {}, ""), el("th", {}, "昵称"), el("th", {}, "状态"),
-            el("th", {}, "最近投稿"), el("th", {}, "最近动态"), el("th", {}, "粉丝"), el("th", {}, ""))),
-          tbody)),
+        el("div", { class: "bfd-tabs" }, ...tabBtns),
+        followPane,
+        favPane),
       el("div", { class: "bfd-foot" },
         el("label", {}, "多久算僵尸 ",
           el("input", { type: "number", min: "30", step: "30", value: String(app.config.staleDays),
@@ -801,18 +1011,21 @@
     } }, panel);
 
     document.body.append(mask);
-    app.ui = { mask, panel, tbody, status, bar, statsLine, filters, charts };
+    app.ui = { mask, panel, tbody, status, bar, statsLine, filters, charts, favStatus, favSummary, favList };
 
     app.throttle.onCooldown = (sec) => setStatus(`被 B站 限流，冷却 ${sec} 秒…`, true);
     renderRows();
     renderStats();
+    renderFav();
+    if (app.tab === "fav") switchTab("fav");
   };
 
   const mount = () => {
     loadState();
+    loadFavState();
     app.throttleWeb.interval = app.config.interval;
     app.throttle.interval = app.config.interval;
-    const fab = el("button", { class: "bfd-fab", title: "扫描你的关注列表，找出僵尸 UP", onclick: openPanel }, "🐟 关注体检");
+    const fab = el("button", { class: "bfd-fab", title: "关注体检 + 收藏夹体检", onclick: openPanel }, "🐟 B站体检");
     document.body.append(fab);
     const style = document.createElement("style");
     style.textContent = CSS;
