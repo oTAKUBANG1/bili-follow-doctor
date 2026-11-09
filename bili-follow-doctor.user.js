@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站关注体检 · Follow Doctor
 // @namespace    https://github.com/mituan/bili-follow-doctor
-// @version      1.2.3
+// @version      1.3.0
 // @description  扫一遍你的关注列表，标出已注销、两年没更新的僵尸 UP；会开直播的一律保留。带状态分布图和停更时长分布图，可一键导出 CSV，也可逐个取关。纯本地运行，不经过任何服务器。
 // @author       米团
 // @match        *://space.bilibili.com/*
@@ -25,7 +25,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.2.3";
+  const VERSION = "1.3.0";
   const CACHE_KEY = "bfd.cache.v2";
   const CONFIG_KEY = "bfd.config.v1";
   const TWO_YEARS = 730 * 86400;
@@ -152,14 +152,14 @@
       for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null) q.set(k, String(v));
       const url = "https://api.bilibili.com" + path + "?" + q;
       for (let i = 0; i < tries; i++) {
-        await app.throttle.wait();
+        await app.throttleWeb.wait();
         let r;
         try { r = await request(url, { headers: { Referer: location.href } }); }
         catch (e) { if (i === tries - 1) throw e; await sleep(2000); continue; }
-        app.throttle.hit();
+        app.throttleWeb.hit();
         if (r.status === 412 || r.status === 429 || r.json?.code === -412) {
           if (i === tries - 1) throw new Error("被B站限流（412），请过几分钟再继续");
-          app.throttle.cool(30 * (i + 1));
+          app.throttleWeb.cool(30 * (i + 1));
           continue;
         }
         if (!r.json) throw new Error("返回不是 JSON（HTTP " + r.status + "）");
@@ -179,11 +179,11 @@
       p.set("sign", md5(q + "560c52ccd288fed045859ed18bffd973"));
       const url = "https://app.bilibili.com/x/v2/space/archive?" + p;
       for (let i = 0; i < tries; i++) {
-        await app.throttle.wait();
+        await app.throttleApp.wait();
         try {
           const r = await request(url, { headers: { Referer: "https://www.bilibili.com/" } });
-          app.throttle.hit();
-          if (r.status === 412 || r.status === 429) { app.throttle.cool(20); continue; }
+          app.throttleApp.hit();
+          if (r.status === 412 || r.status === 429) { app.throttleApp.cool(20); continue; }
           const j = r.json;
           if (!j) return { ok: false, err: "HTTP " + r.status };
           if (j.code === 0) {
@@ -223,17 +223,18 @@
         const sorted = [...p.entries()].sort(([a], [b]) => (a < b ? -1 : 1));
         const q = sorted.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
         p.set("w_rid", md5(q + key));
+        await app.throttleWeb.wait();
         try {
           const r = await request("https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?" + p,
             { headers: { Referer: `https://space.bilibili.com/${mid}` } });
-          await sleep(0);
+          app.throttleWeb.hit();
           const j = r.json;
           if (!j) return { ok: false, err: "HTTP " + r.status };
           if (j.code === 0) {
             const items = j.data?.items || [];
             return { ok: true, ts: items.length ? Number(items[0].modules?.module_author?.pub_ts) || 0 : 0 };
           }
-          if (j.code === -412 || r.status === 412) { app.throttle.cool(30); app.wbiKey = null; continue; }
+          if (j.code === -412 || r.status === 412) { app.throttleWeb.cool(30); app.wbiKey = null; continue; }
           return { ok: false, err: `code ${j.code}` };
         } catch (e) {
           if (i === tries - 1) return { ok: false, err: String(e.message || e) };
@@ -295,7 +296,11 @@
   const app = {
     cache: {},
     config: { interval: 1200, autoFans: true, staleDays: 730 },
-    throttle: new Throttle(1200),
+    // 两条独立的限速池：app 通道（投稿）可以快，web 接口（动态/资料）必须慢。
+    // 挤在一个池里是之前慢的主因 —— 837 个 × 3 请求 × 1.2s ≈ 50 分钟。
+    throttleApp: new Throttle(450),
+    throttleWeb: new Throttle(1200),
+    throttle: new Throttle(1200), // 兼容旧引用，实际用上面两个
     scanning: false,
     aborted: false,
     selfMid: "",
@@ -360,27 +365,33 @@
         // attribute=6 就是互相关注：认识的人，不参与清理
         rec.mutual = Number(u.attribute) === 6;
 
-        if (app.config.autoFans) {
-          const c = await api.card(mid);
-          if (c.deleted) { rec.deleted = true; }
-          else if (c.ok) { rec.name = c.name || rec.name; rec.fans = c.fans; }
-        }
-
-        if (!rec.deleted) {
-          const v = await api.lastVideo(mid);
+        if ((u.uname || "").includes("已注销")) {
+          rec.deleted = true;
+          rec.videoTs = null;
+          rec.dynTs = null;
+        } else {
+          // 投稿（app 通道）和动态（web 通道）并行：两条限速池互不占用，耗时≈较慢的那条
+          const [v, d] = await Promise.all([api.lastVideo(mid), api.lastDynamic(mid)]);
           rec.videoTs = v.ok ? v.ts : null;
           if (!v.ok) rec.err = v.err;
-          const d = await api.lastDynamic(mid);
           rec.dynTs = d.ok ? d.ts : null;
           if (!d.ok && !rec.err) rec.err = d.err;
 
-          // 视频和动态都停了，才去查直播（主播账号不能误删）
           const win = staleWindow();
           const vStale = rec.videoTs === 0 || (rec.videoTs && now() - rec.videoTs > win);
           const dStale = !rec.dynTs || now() - rec.dynTs > win;
-          if (vStale && dStale) rec.live = await api.liveInfo(mid);
-        } else {
-          rec.videoTs = null; rec.dynTs = null;
+          const silent = vStale && dStale;                    // 投稿和动态都停了
+          const empty = rec.videoTs === 0 && rec.dynTs === 0; // 零内容（可能已经注销）
+
+          // 只有「可能被清理」的号才值得多花请求：查资料（判注销 + 拿粉丝）和直播。
+          // 正常号省掉两次请求 —— 这是 837 个能快一倍的关键。
+          if (empty || (silent && app.config.autoFans)) {
+            const c = await api.card(mid);
+            if (c.deleted) { rec.deleted = true; }
+            else if (c.ok) { rec.name = c.name || rec.name; rec.fans = c.fans; }
+          }
+          // 视频和动态都停了，才去查直播（主播账号不能误删）
+          if (silent && !rec.deleted) rec.live = await api.liveInfo(mid);
         }
         rec.checked = true;
         rec.at = now();
@@ -771,9 +782,10 @@
               renderRows(); renderStats();
             } }, "天")),
         el("label", {}, "请求间隔 ",
-          el("input", { type: "number", min: "600", step: "200", value: String(app.config.interval),
+          el("input", { type: "number", min: "400", step: "100", value: String(app.config.interval),
             onchange: (e) => {
-              app.config.interval = Math.max(600, Number(e.target.value) || 1200);
+              app.config.interval = Math.max(400, Number(e.target.value) || 1200);
+              app.throttleWeb.interval = app.config.interval;
               app.throttle.interval = app.config.interval;
               localStorage.setItem(CONFIG_KEY, JSON.stringify(app.config));
             } }, "ms")),
@@ -798,6 +810,7 @@
 
   const mount = () => {
     loadState();
+    app.throttleWeb.interval = app.config.interval;
     app.throttle.interval = app.config.interval;
     const fab = el("button", { class: "bfd-fab", title: "扫描你的关注列表，找出僵尸 UP", onclick: openPanel }, "🐟 关注体检");
     document.body.append(fab);
