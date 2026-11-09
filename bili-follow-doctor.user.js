@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站关注体检 · Follow Doctor
 // @namespace    https://github.com/mituan/bili-follow-doctor
-// @version      1.2.2
+// @version      1.2.3
 // @description  扫一遍你的关注列表，标出已注销、两年没更新的僵尸 UP；会开直播的一律保留。带状态分布图和停更时长分布图，可一键导出 CSV，也可逐个取关。纯本地运行，不经过任何服务器。
 // @author       米团
 // @match        *://space.bilibili.com/*
@@ -25,7 +25,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.2.2";
+  const VERSION = "1.2.3";
   const CACHE_KEY = "bfd.cache.v2";
   const CONFIG_KEY = "bfd.config.v1";
   const TWO_YEARS = 730 * 86400;
@@ -638,11 +638,11 @@
 
   // ---------------------------------------------------------------- UI
   const CSS = `
-  .bfd-fab{position:fixed;right:22px;bottom:26px;z-index:2147483000;display:flex;align-items:center;gap:6px;
+  .bfd-fab{position:fixed;right:22px;bottom:26px;z-index:9999;display:flex;align-items:center;gap:6px;
     padding:10px 16px;border-radius:999px;background:#fb7299;color:#fff;font:14px/1 system-ui,sans-serif;
     box-shadow:0 6px 20px rgba(251,114,153,.45);cursor:pointer;border:0;transition:.15s}
   .bfd-fab:hover{transform:translateY(-1px);filter:brightness(1.05)}
-  .bfd-mask{position:fixed;inset:0;z-index:2147483001;background:rgba(8,12,18,.55);display:flex;
+  .bfd-mask{position:fixed;inset:0;z-index:2147483646;background:rgba(8,12,18,.55);display:flex;
     align-items:center;justify-content:center;backdrop-filter:blur(2px)}
   .bfd-panel{width:min(1080px,94vw);max-height:88vh;display:flex;flex-direction:column;overflow:hidden;
     background:#161b22;color:#e6edf6;border:1px solid #273040;border-radius:16px;
