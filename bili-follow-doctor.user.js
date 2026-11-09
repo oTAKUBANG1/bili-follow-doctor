@@ -1,10 +1,15 @@
 // ==UserScript==
 // @name         B站关注体检 · Follow Doctor
 // @namespace    https://github.com/mituan/bili-follow-doctor
-// @version      1.2.0
+// @version      1.2.1
 // @description  扫一遍你的关注列表，标出已注销、两年没更新的僵尸 UP；会开直播的一律保留。带状态分布图和停更时长分布图，可一键导出 CSV，也可逐个取关。纯本地运行，不经过任何服务器。
 // @author       米团
-// @match        https://space.bilibili.com/*
+// @match        *://space.bilibili.com/*
+// @match        *://www.bilibili.com/*
+// @match        *://t.bilibili.com/*
+// @match        *://live.bilibili.com/*
+// @match        *://search.bilibili.com/*
+// @match        *://bilibili.com/*
 // @icon         https://www.bilibili.com/favicon.ico
 // @grant        GM_xmlhttpRequest
 // @connect      app.bilibili.com
@@ -18,7 +23,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.2.0";
+  const VERSION = "1.2.1";
   const CACHE_KEY = "bfd.cache.v2";
   const CONFIG_KEY = "bfd.config.v1";
   const TWO_YEARS = 730 * 86400;
@@ -797,6 +802,8 @@
     const style = document.createElement("style");
     style.textContent = CSS;
     document.head.append(style);
+    // 排查用：装完在控制台应该能看到这一行。看不到就是没注入（页面不在 @match 范围里）
+    console.log(`[关注体检] v${VERSION} 已注入 ${location.hostname}${location.pathname}`);
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount);
