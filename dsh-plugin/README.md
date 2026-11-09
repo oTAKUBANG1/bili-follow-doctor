@@ -1,21 +1,35 @@
-﻿# dsh-bili-follow-doctor
+# dsh-bili-follow-doctor
 
 DeepSeek Harness 插件版「B站关注体检」：扫关注 → 查最近投稿/动态 → 出名单 → 经确认后逐个取关。
 只走本机网络，凭证存在 `~/.dsh/bili-follow/cred.json`，不经过第三方。
 
+**v1.2.0 起自带设置页**：不用每次让 AI 帮你敲工具，DSH「设置」里多一页「关注体检」，
+总览、阈值、开扫、看名单、出报表、勾选取关都在里面。
+
 ## 安装
 
 ```bash
-# 本地目录直接挂（开发用）
-dsh plugin --profile web add link:D:\project-demo\dsh-bili-follow-doctor
+# 插件市场 / GitHub 源
+dsh plugin --profile web add github:oTAKUBANG1/bili-follow-doctor#path:/dsh-plugin
 
-# 或者发布到 npm 后
-dsh plugin --profile web add dsh-bili-follow-doctor
+# 本地开发（换成你自己的路径）
+dsh plugin --profile web add link:/path/to/bili-follow-doctor/dsh-plugin
 ```
 
-装上后在 profile 的 `dsh.profile.bundles` 里出现即可，重启会话生效。
+装上后重启 DSH，左侧「设置」里会出现「关注体检」这一页。会话里的工具也同时可用。
 
-## 工具
+## 设置页怎么用
+
+1. **账号**：装过「刷B站」的话会自动复用它的登录；没有就从浏览器 F12 → Application → Cookies
+   抄 `SESSDATA` / `bili_jct` / `buvid3` / `DedeUserID` 四项填进去。
+2. **多久没动静算僵尸**：填天数，或者点 1 年 / 2 年 / 3 年。
+3. **开始扫描**：后台跑，可以离开这一页去看别的，进度条会自己走。
+4. **名单**：按状态筛（僵尸号 / 已注销 / 零内容 / 只发动态 / 播过的主播 / 互关 / 正常），可翻页。
+5. **取关**：勾选 → 点「取关选中的」→ 弹确认框。正在直播/播过的主播和互关默认被跳过，
+   要删它们得单独点那行的按钮（跟命令行 `allowLive` / `allowMutual` 同一套规则）。
+6. **导出 CSV + Markdown**：落在 `~/.dsh/bili-follow/out/`。
+
+## 工具（会话里用）
 
 | 工具 | 作用 |
 |---|---|
@@ -26,6 +40,9 @@ dsh plugin --profile web add dsh-bili-follow-doctor
 | `bili_follow_report` | 导出 CSV + Markdown 到 `~/.dsh/bili-follow/out/`，支持 `staleDays` |
 | `bili_follow_unfollow` | 取关（**必须 `confirm:true`**，一次最多 50 个；正在直播/播过的默认跳过，`allowLive:true` 才删） |
 | `bili_follow_status` | 总览：凭证是否就绪、扫了多少、各状态数量 |
+
+设置页读写的接口在 `/api/bili-follow/*`（`status` / `list` / `scan` / `stop` / `report` / `unfollow` / `cred`），
+跟工具共用同一套实现，不会两边口径漂移。
 
 ## 典型流程
 
@@ -59,6 +76,6 @@ dsh plugin --profile web add dsh-bili-follow-doctor
 
 - 取关不可撤销；插件强制要求 `confirm:true`，且一次最多 50 个。
 - 只看投稿视频 + 动态，不看专栏/直播；只直播的 UP 会被算成僵尸。
-- 别把 `limit` 开太大：工具调用超时会被中断（默认 40 个约 1.5 分钟）。
+- 别把 `limit` 开太大：工具调用超时会被中断（设置页默认每批 40 个，约 1.5 分钟一批）。
 
 License: MIT

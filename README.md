@@ -45,6 +45,9 @@ https://raw.githubusercontent.com/oTAKUBANG1/bili-follow-doctor/main/bili-follow
 
 3. 打开任意 B站 页面，右下角出现「🐟 关注体检」
 
+面板里有**状态分布环形图**和**停更时长分布**（2–3 年 / 3–5 年 / 5–8 年 / 8 年以上），
+扫完一眼就能看出「僵尸号都停更多久了」。图是纯 SVG 画的，不引任何外部库，断网也能看。
+
 ## 命令行
 
 ```bash
@@ -59,10 +62,13 @@ python unfollow.py --report out/follow_final_xxx.csv --status "2年无任何更�
 ## DSH 插件
 
 ```bash
-dsh plugin --profile web add link:$(pwd)/dsh-plugin
+# 插件市场 / GitHub 源
+dsh plugin --profile web add github:oTAKUBANG1/bili-follow-doctor#path:/dsh-plugin
 ```
 
-注册 7 个工具（登录 / 扫描 / 列名单 / 报表 / 取关 / 状态）。详见 [`dsh-plugin/README.md`](dsh-plugin/README.md)。
+装上重启后，DSH「设置」里多一页**「关注体检」**：总览、阈值、后台扫描进度、名单筛选、
+导出报表、勾选取关都在界面上，不用每次让 AI 敲工具。同时注册 7 个工具供会话使用
+（登录 / 扫描 / 列名单 / 报表 / 取关 / 状态）。详见 [`dsh-plugin/README.md`](dsh-plugin/README.md)。
 
 ## 可视化仪表盘
 

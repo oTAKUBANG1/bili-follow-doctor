@@ -1,4 +1,4 @@
-﻿/**
+/**
  * dsh-bili-follow-doctor —— 主机半端
  * ============================================================================
  * 给 DeepSeek Harness 用的「B站关注体检」插件：扫关注 → 查最近投稿/动态 → 出名单 →
@@ -25,7 +25,8 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 
 export const name = 'bili-follow-doctor'
-export const inject = ['tools']
+// webServer 用来挂设置页的接口（/api/bili-follow/*）；老版本宿主没有就退化成只有工具可用
+export const inject = ['tools', 'webServer']
 
 const HOME = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'bili-follow')
 const CACHE_FILE = join(HOME, 'cache.json')
@@ -229,6 +230,215 @@ function statusOf(r, staleDays = 730) {
 }
 const staleDaysOf = (v) => Math.max(30, Number(v) || 730)
 
+// ---------------------------------------------------------------- 可复用的动作
+// 工具（会话里调）和 HTTP 接口（设置页调）共用同一套实现，避免两边逻辑漂移。
+
+/** 扫一批。c = 凭证对象。args 同工具参数。 */
+async function scanBatch(c, args = {}) {
+  const cookie = cookieHeader(c)
+  const limit = Math.max(1, Math.min(Number(args.limit) || 40, 100))
+  const interval = Math.max(300, Math.min(Number(args.intervalMs) || 900, 5000))
+  const cache = args.refresh ? { rows: {}, updatedAt: 0 } : loadCache()
+
+  const fw = await fetchFollowings(cookie, c.dedeuserid)
+  const pending = fw.filter((u) => {
+    const r = cache.rows[String(u.mid)]
+    return !r || !r.checked
+  })
+  const batch = pending.slice(0, limit)
+  const started = Date.now()
+  let deleted = 0
+
+  for (const [i, u] of batch.entries()) {
+    const mid = String(u.mid)
+    const rec = { mid, name: u.uname || '', sign: (u.sign || '').slice(0, 40) }
+    rec.mutual = Number(u.attribute) === 6 // attribute=6 就是互相关注
+    if ((u.uname || '').includes('已注销')) {
+      rec.deleted = true
+      deleted += 1
+    } else {
+      const card = await cardInfo(cookie, mid).catch(() => ({ ok: false }))
+      if (card.deleted) { rec.deleted = true; deleted += 1 }
+      else if (card.ok) { rec.name = card.name || rec.name; rec.fans = card.fans }
+      if (!rec.deleted) {
+        const v = await appLastVideo(mid)
+        rec.videoTs = v.ok ? v.ts : null
+        if (!v.ok) rec.err = v.err
+        const d = await lastDynamic(cookie, mid)
+        rec.dynTs = d.ok ? d.ts : null
+        if (!d.ok && !rec.err) rec.err = d.err
+
+        // 视频和动态都停了才查直播：主播不能误删
+        const win = staleDaysOf(args.staleDays) * 86400
+        const vStale = rec.videoTs === 0 || (rec.videoTs && nowSec() - rec.videoTs > win)
+        const dStale = !rec.dynTs || nowSec() - rec.dynTs > win
+        if (vStale && dStale) {
+          const li = await liveInfo(mid)
+          rec.liveNow = li.live
+          rec.liveStreamed = li.streamed
+          rec.liveRoom = li.room
+          rec.liveTitle = li.title
+          await sleep(300)
+        }
+      }
+      await sleep(interval)
+    }
+    rec.checked = true
+    rec.at = nowSec()
+    cache.rows[mid] = rec
+    if (i % 5 === 4) saveCache(cache)
+    if (i < batch.length - 1) await sleep(200)
+  }
+  saveCache(cache)
+
+  const rows = Object.values(cache.rows).filter((r) => r.checked)
+  const sd = staleDaysOf(args.staleDays)
+  const counts = countByStatus(rows, sd)
+  return {
+    ok: true,
+    scannedThisCall: batch.length,
+    scannedTotal: rows.length,
+    followingTotal: fw.length,
+    remaining: Math.max(0, pending.length - batch.length),
+    deletedThisCall: deleted,
+    counts,
+    ms: Date.now() - started,
+  }
+}
+
+function countByStatus(rows, staleDays = 730) {
+  const counts = {}
+  for (const r of rows) {
+    const st = statusOf(r, staleDays)
+    counts[st] = (counts[st] || 0) + 1
+  }
+  return counts
+}
+
+const STATUS_RANK = { deleted: 0, zombie: 1, empty: 2, mutual: 3, streamed: 4, live: 5, dynonly: 6, error: 7, alive: 8 }
+
+/** 按状态列名单（工具和设置页共用） */
+function listRows(args = {}) {
+  const cache = loadCache()
+  const want = String(args.status || 'zombie')
+  const sd = staleDaysOf(args.staleDays)
+  let rows = Object.values(cache.rows).filter((r) => r.checked)
+  if (want !== 'all') rows = rows.filter((r) => statusOf(r, sd) === want)
+  rows.sort((a, b) => (STATUS_RANK[statusOf(a, sd)] - STATUS_RANK[statusOf(b, sd)])
+    || ((nowSec() - (b.videoTs || nowSec())) - (nowSec() - (a.videoTs || nowSec()))))
+  const offset = Math.max(0, Number(args.offset) || 0)
+  const limit = Math.max(1, Math.min(Number(args.limit) || 50, 500))
+  return {
+    ok: true,
+    total: rows.length,
+    offset,
+    count: Math.min(limit, Math.max(0, rows.length - offset)),
+    rows: rows.slice(offset, offset + limit).map((r) => ({
+      mid: r.mid, name: r.name, status: statusOf(r, sd), statusText: STATUS_LABEL[statusOf(r, sd)],
+      lastVideo: fmtDate(r.videoTs), lastDynamic: fmtDate(r.dynTs),
+      videoTs: r.videoTs, dynTs: r.dynTs,
+      fans: r.fans ?? null, url: `https://space.bilibili.com/${r.mid}`,
+      err: r.err || undefined,
+    })),
+  }
+}
+
+/** 出 CSV + Markdown */
+function writeReport(args = {}) {
+  const cache = loadCache()
+  const rows = Object.values(cache.rows).filter((r) => r.checked)
+  if (!rows.length) return { ok: false, err: '还没有扫描结果，先调用 bili_follow_scan' }
+  ensureDir(OUT_DIR)
+  const sd = staleDaysOf(args.staleDays)
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '')
+  rows.sort((a, b) => STATUS_RANK[statusOf(a, sd)] - STATUS_RANK[statusOf(b, sd)])
+  const counts = countByStatus(rows, sd)
+
+  const csvPath = join(OUT_DIR, `follow_${stamp}.csv`)
+  const mdPath = join(OUT_DIR, `follow_${stamp}.md`)
+  const esc = (s) => `"${String(s ?? '').replace(/"/g, '""')}"`
+  const lines = [['状态', 'UID', '昵称', '最近投稿', '最近动态', '粉丝数', '主页'].join(',')]
+  for (const r of rows) {
+    lines.push([
+      STATUS_LABEL[statusOf(r, sd)], r.mid, esc(r.name), fmtDate(r.videoTs) || '-',
+      fmtDate(r.dynTs) || '-', r.fans ?? '', `https://space.bilibili.com/${r.mid}`,
+    ].join(','))
+  }
+  writeFileSync(csvPath, '\ufeff' + lines.join('\n'))
+
+  const md = [`# B站关注体检 ${new Date().toLocaleString('zh-CN')}`, '',
+    `共 ${rows.length} 个关注：` + Object.entries(counts).map(([k, v]) => `${STATUS_LABEL[k]} ${v}`).join('，'), '']
+  for (const key of ['deleted', 'zombie', 'empty', 'mutual', 'streamed', 'live', 'dynonly', 'error']) {
+    const sub = rows.filter((r) => statusOf(r, sd) === key)
+    md.push(`## ${STATUS_LABEL[key]}（${sub.length}）`, '')
+    if (!sub.length) { md.push('无', ''); continue }
+    md.push('| # | UID | 昵称 | 最近投稿 | 最近动态 | 粉丝 | 主页 |', '|---|---|---|---|---|---|---|')
+    sub.forEach((r, i) => md.push(`| ${i + 1} | ${r.mid} | ${r.name} | ${fmtDate(r.videoTs) || '-'} | `
+      + `${fmtDate(r.dynTs) || '-'} | ${r.fans ?? '-'} | https://space.bilibili.com/${r.mid} |`))
+    md.push('')
+  }
+  writeFileSync(mdPath, md.join('\n'))
+  return { ok: true, total: rows.length, counts, csv: csvPath, md: mdPath }
+}
+
+/** 取关（工具和设置页共用）。主播/互关默认保护。 */
+async function doUnfollow(c, args = {}) {
+  const mids = (args.mids || []).map(Number).filter((n) => Number.isFinite(n) && n > 0)
+  if (!args.confirm) return { ok: false, err: '拒绝执行：需要 confirm:true（取关不可撤销，必须使用者当场确认）' }
+  if (!mids.length) return { ok: false, err: 'mids 为空' }
+  if (mids.length > 50) return { ok: false, err: '一次最多 50 个，请分批' }
+  if (!c.bili_jct) return { ok: false, err: '凭证里没有 bili_jct（csrf），无法取关' }
+  const cache = loadCache()
+  // 主播保护：正在直播 / 播过的账号默认跳过
+  const skippedLive = []
+  const skippedMutual = []
+  const targets = mids.filter((mid) => {
+    const r = cache.rows[String(mid)]
+    if (!r) return true
+    if (!args.allowMutual && statusOf(r) === 'mutual') { skippedMutual.push(mid); return false }
+    if (!args.allowLive && statusOf(r) === 'live') { skippedLive.push(mid); return false }
+    if (!args.allowLive && statusOf(r) === 'streamed') { skippedLive.push(mid); return false }
+    return true
+  })
+  if (!targets.length) {
+    return { ok: false, err: `这 ${mids.length} 个都是正在直播/播过的账号，已全部跳过（确需删除请传 allowLive:true）` }
+  }
+  const results = []
+  for (const [i, mid] of targets.entries()) {
+    const r = await fetch('https://api.bilibili.com/x/relation/modify', {
+      method: 'POST',
+      headers: {
+        'User-Agent': UA, Cookie: cookieHeader(c), Referer: 'https://space.bilibili.com/',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ fid: String(mid), act: '2', re_src: '11', csrf: c.bili_jct }).toString(),
+    }).then((x) => x.json()).catch((e) => ({ code: -1, message: String(e.message || e) }))
+    const ok = r.code === 0
+    const name = cache.rows[String(mid)]?.name
+    if (ok) delete cache.rows[String(mid)]
+    results.push({ mid, name, ok, code: r.code, message: r.message })
+    if (i < targets.length - 1) await sleep(Math.max(500, Number(args.intervalMs) || 1500))
+  }
+  saveCache(cache)
+  const okCount = results.filter((r) => r.ok).length
+  return { ok: true, okCount, failCount: results.length - okCount, skippedLive, skippedMutual, results }
+}
+
+/** 总览（设置页顶部的卡片） */
+function statusSummary() {
+  const cache = loadCache()
+  const rows = Object.values(cache.rows).filter((r) => r.checked)
+  const c = loadCred()
+  return {
+    ok: true,
+    credential: c ? { mid: c.dedeuserid, ready: true, hasCsrf: Boolean(c.bili_jct) } : { ready: false },
+    scanned: rows.length,
+    counts: countByStatus(rows),
+    cacheUpdatedAt: cache.updatedAt ? new Date(cache.updatedAt * 1000).toLocaleString('zh-CN') : null,
+    home: HOME,
+  }
+}
+
 const STATUS_LABEL = {
   deleted: '已注销', zombie: '僵尸号', dynonly: '只发动态',
   empty: '零内容', error: '查询失败', alive: '正常',
@@ -340,78 +550,8 @@ export function apply(ctx) {
       staleDays: { type: 'number', description: '多少天没更新算僵尸（默认 730，比如传 365 就是一年）' },
     },
     async execute(args) {
-      const c = needCred()
-      const cookie = cookieHeader(c)
-      const limit = Math.max(1, Math.min(Number(args.limit) || 40, 100))
-      const interval = Math.max(300, Math.min(Number(args.intervalMs) || 900, 5000))
-      const cache = args.refresh ? { rows: {}, updatedAt: 0 } : loadCache()
-
-      const fw = await fetchFollowings(cookie, c.dedeuserid)
-      const pending = fw.filter((u) => {
-        const r = cache.rows[String(u.mid)]
-        return !r || !r.checked
-      })
-      const batch = pending.slice(0, limit)
-      const started = Date.now()
-      let deleted = 0
-
-      for (const [i, u] of batch.entries()) {
-        const mid = String(u.mid)
-        const rec = { mid, name: u.uname || '', sign: (u.sign || '').slice(0, 40) }
-        rec.mutual = Number(u.attribute) === 6 // attribute=6 就是互相关注
-        if ((u.uname || '').includes('已注销')) {
-          rec.deleted = true
-          deleted += 1
-        } else {
-          const card = await cardInfo(cookie, mid).catch(() => ({ ok: false }))
-          if (card.deleted) { rec.deleted = true; deleted += 1 }
-          else if (card.ok) { rec.name = card.name || rec.name; rec.fans = card.fans }
-          if (!rec.deleted) {
-            const v = await appLastVideo(mid)
-            rec.videoTs = v.ok ? v.ts : null
-            if (!v.ok) rec.err = v.err
-            const d = await lastDynamic(cookie, mid)
-            rec.dynTs = d.ok ? d.ts : null
-            if (!d.ok && !rec.err) rec.err = d.err
-
-            // 视频和动态都停了才查直播：主播不能误删
-            const win = staleDaysOf(args.staleDays) * 86400
-            const vStale = rec.videoTs === 0 || (rec.videoTs && nowSec() - rec.videoTs > win)
-            const dStale = !rec.dynTs || nowSec() - rec.dynTs > win
-            if (vStale && dStale) {
-              const li = await liveInfo(mid)
-              rec.liveNow = li.live
-              rec.liveStreamed = li.streamed
-              rec.liveRoom = li.room
-              rec.liveTitle = li.title
-              await sleep(300)
-            }
-          }
-          await sleep(interval)
-        }
-        rec.checked = true
-        rec.at = nowSec()
-        cache.rows[mid] = rec
-        if (i % 5 === 4) saveCache(cache)
-        if (i < batch.length - 1) await sleep(200)
-      }
-      saveCache(cache)
-
-      const rows = Object.values(cache.rows).filter((r) => r.checked)
-      const sd = staleDaysOf(args.staleDays)
-      const counts = {}
-      for (const r of rows) counts[statusOf(r, sd)] = (counts[statusOf(r, sd)] || 0) + 1
-      return {
-        ok: true,
-        scannedThisCall: batch.length,
-        scannedTotal: rows.length,
-        followingTotal: fw.length,
-        remaining: Math.max(0, pending.length - batch.length),
-        deletedThisCall: deleted,
-        counts,
-        ms: Date.now() - started,
-        next: Math.max(0, pending.length - batch.length) > 0 ? '继续调用 bili_follow_scan' : '可以出报表了：bili_follow_report',
-      }
+      const r = await scanBatch(needCred(), args)
+      return { ...r, next: r.remaining > 0 ? '继续调用 bili_follow_scan' : '可以出报表了：bili_follow_report' }
     },
   })
 
@@ -426,23 +566,7 @@ export function apply(ctx) {
       staleDays: { type: 'number', description: '多少天没更新算僵尸（默认 730）' },
     },
     async execute(args) {
-      const cache = loadCache()
-      const want = String(args.status || 'zombie')
-      const sd = staleDaysOf(args.staleDays)
-      let rows = Object.values(cache.rows).filter((r) => r.checked)
-      if (want !== 'all') rows = rows.filter((r) => statusOf(r, sd) === want)
-      const rank = { deleted: 0, zombie: 1, empty: 2, mutual: 3, streamed: 4, live: 5, dynonly: 6, error: 7, alive: 8 }
-      rows.sort((a, b) => (rank[statusOf(a, sd)] - rank[statusOf(b, sd)])
-        || ((nowSec() - (b.videoTs || nowSec())) - (nowSec() - (a.videoTs || nowSec()))))
-      const offset = Math.max(0, Number(args.offset) || 0)
-      const limit = Math.max(1, Math.min(Number(args.limit) || 50, 500))
-      const page = rows.slice(offset, offset + limit).map((r) => ({
-        mid: r.mid, name: r.name, status: STATUS_LABEL[statusOf(r, sd)],
-        lastVideo: fmtDate(r.videoTs), lastDynamic: fmtDate(r.dynTs),
-        fans: r.fans ?? null, url: `https://space.bilibili.com/${r.mid}`,
-        err: r.err || undefined,
-      }))
-      return { ok: true, total: rows.length, offset, count: page.length, rows: page }
+      return listRows(args)
     },
   })
 
@@ -453,42 +577,7 @@ export function apply(ctx) {
       staleDays: { type: 'number', description: '多少天没更新算僵尸（默认 730）' },
     },
     async execute(args = {}) {
-      const cache = loadCache()
-      const rows = Object.values(cache.rows).filter((r) => r.checked)
-      if (!rows.length) return { ok: false, err: '还没有扫描结果，先调用 bili_follow_scan' }
-      ensureDir(OUT_DIR)
-      const sd = staleDaysOf(args.staleDays)
-      const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '')
-      const rank = { deleted: 0, zombie: 1, empty: 2, mutual: 3, streamed: 4, live: 5, dynonly: 6, error: 7, alive: 8 }
-      rows.sort((a, b) => rank[statusOf(a, sd)] - rank[statusOf(b, sd)])
-      const counts = {}
-      for (const r of rows) counts[statusOf(r, sd)] = (counts[statusOf(r, sd)] || 0) + 1
-
-      const csvPath = join(OUT_DIR, `follow_${stamp}.csv`)
-      const mdPath = join(OUT_DIR, `follow_${stamp}.md`)
-      const esc = (s) => `"${String(s ?? '').replace(/"/g, '""')}"`
-      const lines = [['状态', 'UID', '昵称', '最近投稿', '最近动态', '粉丝数', '主页'].join(',')]
-      for (const r of rows) {
-        lines.push([
-          STATUS_LABEL[statusOf(r, sd)], r.mid, esc(r.name), fmtDate(r.videoTs) || '-',
-          fmtDate(r.dynTs) || '-', r.fans ?? '', `https://space.bilibili.com/${r.mid}`,
-        ].join(','))
-      }
-      writeFileSync(csvPath, '\ufeff' + lines.join('\n'))
-
-      const md = [`# B站关注体检 ${new Date().toLocaleString('zh-CN')}`, '',
-        `共 ${rows.length} 个关注：` + Object.entries(counts).map(([k, v]) => `${STATUS_LABEL[k]} ${v}`).join('，'), '']
-      for (const key of ['deleted', 'zombie', 'empty', 'mutual', 'streamed', 'live', 'dynonly', 'error']) {
-        const sub = rows.filter((r) => statusOf(r, sd) === key)
-        md.push(`## ${STATUS_LABEL[key]}（${sub.length}）`, '')
-        if (!sub.length) { md.push('无', ''); continue }
-        md.push('| # | UID | 昵称 | 最近投稿 | 最近动态 | 粉丝 | 主页 |', '|---|---|---|---|---|---|---|')
-        sub.forEach((r, i) => md.push(`| ${i + 1} | ${r.mid} | ${r.name} | ${fmtDate(r.videoTs) || '-'} | `
-          + `${fmtDate(r.dynTs) || '-'} | ${r.fans ?? '-'} | https://space.bilibili.com/${r.mid} |`))
-        md.push('')
-      }
-      writeFileSync(mdPath, md.join('\n'))
-      return { ok: true, total: rows.length, counts, csv: csvPath, md: mdPath }
+      return writeReport(args)
     },
   })
 
@@ -504,47 +593,7 @@ export function apply(ctx) {
       intervalMs: { type: 'number', description: '每个取关之间的间隔，默认 1500' },
     },
     async execute(args) {
-      const mids = (args.mids || []).map(Number).filter((n) => Number.isFinite(n) && n > 0)
-      if (!args.confirm) return { ok: false, err: '拒绝执行：需要 confirm:true（取关不可撤销，必须使用者当场确认）' }
-      if (!mids.length) return { ok: false, err: 'mids 为空' }
-      if (mids.length > 50) return { ok: false, err: '一次最多 50 个，请分批' }
-      const c = needCred()
-      if (!c.bili_jct) return { ok: false, err: '凭证里没有 bili_jct（csrf），无法取关' }
-      const cache = loadCache()
-      // 主播保护：正在直播 / 播过的账号默认跳过
-      const skippedLive = []
-      const skippedMutual = []
-      const targets = mids.filter((mid) => {
-        const r = cache.rows[String(mid)]
-        if (!r) return true
-        if (!args.allowMutual && statusOf(r) === 'mutual') { skippedMutual.push(mid); return false }
-        if (!args.allowLive && statusOf(r) === 'live') { skippedLive.push(mid); return false }
-        if (!args.allowLive && statusOf(r) === 'streamed') { skippedLive.push(mid); return false }
-        return true
-      })
-      if (!targets.length) {
-        return { ok: false, err: `这 ${mids.length} 个都是正在直播/播过的账号，已全部跳过（确需删除请传 allowLive:true）` }
-      }
-      const results = []
-      for (const [i, mid] of targets.entries()) {
-        const r = await fetch('https://api.bilibili.com/x/relation/modify', {
-          method: 'POST',
-          headers: {
-            'User-Agent': UA, Cookie: cookieHeader(c), Referer: 'https://space.bilibili.com/',
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: new URLSearchParams({ fid: String(mid), act: '2', re_src: '11', csrf: c.bili_jct }).toString(),
-        }).then((x) => x.json()).catch((e) => ({ code: -1, message: String(e.message || e) }))
-        const ok = r.code === 0
-        const name = cache.rows[String(mid)]?.name
-        if (ok) delete cache.rows[String(mid)]
-        results.push({ mid, name, ok, code: r.code, message: r.message })
-        if (i < targets.length - 1) await sleep(Math.max(500, Number(args.intervalMs) || 1500))
-      }
-      saveCache(cache)
-      const okCount = results.filter((r) => r.ok).length
-      return { ok: true, okCount, failCount: results.length - okCount,
-        skippedLive, skippedMutual, results }
+      return doUnfollow(needCred(), args)
     },
   })
 
@@ -553,19 +602,127 @@ export function apply(ctx) {
     description: '关注体检的总览：缓存了多少、各状态数量、凭证是否就绪、缓存更新时间。',
     parameters: {},
     async execute() {
-      const cache = loadCache()
-      const rows = Object.values(cache.rows).filter((r) => r.checked)
-      const counts = {}
-      for (const r of rows) counts[statusOf(r)] = (counts[statusOf(r)] || 0) + 1
-      const c = loadCred()
-      return {
-        ok: true,
-        credential: c ? { mid: c.dedeuserid, ready: true } : { ready: false },
-        scanned: rows.length,
-        counts,
-        cacheUpdatedAt: cache.updatedAt ? new Date(cache.updatedAt * 1000).toLocaleString('zh-CN') : null,
-        home: HOME,
-      }
+      return statusSummary()
     },
   })
+
+  /* ─────────────── HTTP（设置页用） ───────────────
+   * 设置页（client.js）跟这里说话。所有写入型动作（取关/存凭证）仍然要显式确认参数，
+   * 网页上点一次按钮 = 一次明确的用户动作，跟会话里点头等价。
+   * 扫描不能挂在 HTTP 请求里等（879 个要十几分钟），所以起后台任务、前端轮询进度。
+   */
+  const sendJson = (res, code, obj) => {
+    res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify(obj))
+  }
+  const readBody = (req) => new Promise((resolve) => {
+    let data = ''
+    let done = false
+    // 超过 1MB 先 settle 再掐断，否则 Promise 永远不返回、请求挂死
+    const finish = (v) => { if (!done) { done = true; resolve(v) } }
+    req.on('data', (c) => { data += c; if (data.length > 1_000_000) { data = ''; finish({}); req.destroy() } })
+    req.on('end', () => { try { finish(JSON.parse(data || '{}')) } catch { finish({}) } })
+    req.on('error', () => finish({}))
+  })
+
+  let job = null
+  const jobView = () => (job ? {
+    running: job.running, startedAt: job.startedAt, finishedAt: job.finishedAt,
+    scanned: job.scanned, total: job.total, batches: job.batches,
+    last: job.last, error: job.error || null,
+  } : null)
+
+  async function scanLoop(c, args) {
+    job = { running: true, startedAt: Date.now(), scanned: 0, total: 0, batches: 0, last: null, stop: false, error: null }
+    try {
+      while (!job.stop) {
+        const r = await scanBatch(c, { ...args, limit: args.limit || 40 })
+        job.scanned = r.scannedTotal
+        job.total = r.followingTotal
+        job.batches += 1
+        job.last = { scannedThisCall: r.scannedThisCall, remaining: r.remaining, counts: r.counts }
+        if (!r.remaining) break
+      }
+    } catch (e) {
+      job.error = String(e?.message || e)
+    } finally {
+      job.running = false
+      job.finishedAt = Date.now()
+    }
+  }
+
+  const handle = async (req, res, url) => {
+    const p = url.pathname
+
+    if (req.method === 'GET' && p === '/api/bili-follow/status') {
+      return sendJson(res, 200, { ...statusSummary(), job: jobView() })
+    }
+
+    if (req.method === 'GET' && p === '/api/bili-follow/list') {
+      return sendJson(res, 200, listRows({
+        status: url.searchParams.get('status') || 'zombie',
+        limit: Number(url.searchParams.get('limit')) || 50,
+        offset: Number(url.searchParams.get('offset')) || 0,
+        staleDays: Number(url.searchParams.get('staleDays')) || 730,
+      }))
+    }
+
+    if (req.method === 'GET' && p === '/api/bili-follow/scan') {
+      return sendJson(res, 200, { ok: true, job: jobView() })
+    }
+
+    if (req.method === 'POST' && p === '/api/bili-follow/scan') {
+      if (job?.running) return sendJson(res, 200, { ok: false, error: '已经在扫了' })
+      const body = await readBody(req)
+      let c
+      try { c = needCred() } catch (e) { return sendJson(res, 200, { ok: false, error: String(e?.message || e) }) }
+      scanLoop(c, body) // 不 await：立刻把控制权还给浏览器
+      return sendJson(res, 200, { ok: true, started: true })
+    }
+
+    if (req.method === 'POST' && p === '/api/bili-follow/stop') {
+      if (!job?.running) return sendJson(res, 200, { ok: true, running: false })
+      job.stop = true
+      return sendJson(res, 200, { ok: true, stopping: true })
+    }
+
+    if (req.method === 'POST' && p === '/api/bili-follow/report') {
+      const body = await readBody(req)
+      return sendJson(res, 200, writeReport(body))
+    }
+
+    if (req.method === 'POST' && p === '/api/bili-follow/unfollow') {
+      const body = await readBody(req)
+      let c
+      try { c = needCred() } catch (e) { return sendJson(res, 200, { ok: false, err: String(e?.message || e) }) }
+      return sendJson(res, 200, await doUnfollow(c, body))
+    }
+
+    // 手动贴凭证（从浏览器 F12 抄 cookie）。脚本类工具在这台机器上更省事的做法是复用「刷B站」的登录。
+    if (req.method === 'POST' && p === '/api/bili-follow/cred') {
+      const body = await readBody(req)
+      const pick = (k) => String(body[k] || '').trim()
+      const cred = { sessdata: pick('sessdata'), bili_jct: pick('bili_jct'), buvid3: pick('buvid3'), dedeuserid: pick('dedeuserid') }
+      if (!cred.sessdata) return sendJson(res, 200, { ok: false, error: '缺少 sessdata' })
+      ensureDir(HOME)
+      writeFileSync(CRED_FILE, JSON.stringify(cred))
+      return sendJson(res, 200, { ok: true, saved: CRED_FILE })
+    }
+
+    return sendJson(res, 404, { ok: false, error: `unknown ${req.method} ${p}` })
+  }
+
+  try {
+    if (!ctx.webServer?.register) throw new Error('宿主没有 webServer 服务（版本太老？）')
+    ctx.effect(() => ctx.webServer.register({
+      kind: 'prefix',
+      path: '/api/bili-follow',
+      handler: async (req, res) => {
+        try { await handle(req, res, new URL(req.url, 'http://127.0.0.1')) }
+        catch (e) { try { sendJson(res, 500, { ok: false, error: e?.message ?? String(e) }) } catch { /* 响应已发出 */ } }
+      },
+    }), 'bili-follow-doctor: /api/bili-follow 路由')
+  } catch (e) {
+    console.warn('[bili-follow-doctor] HTTP 路由没挂上，设置页不可用：', e?.message ?? e)
+  }
 }

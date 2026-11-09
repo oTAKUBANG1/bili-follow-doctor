@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## 1.2.0 — 2026-11-09
+
+### 新增
+- **DSH 插件自带设置页**（`dsh-plugin/client.js`）：`{ name: 'settings.section', id, order, label }`
+  往 DSH「设置」里注册一页「关注体检」。总览卡片、阈值（天数 + 1/2/3 年快捷）、后台扫描 + 进度条、
+  按状态筛的名单、导出报表、勾选取关（弹确认框）全在里面。
+- **host 端 HTTP 接口** `/api/bili-follow/*`：`status` / `list` / `scan` / `stop` / `report` / `unfollow` / `cred`。
+  扫描改成**后台任务 + 前端轮询**，不再挂在请求里等（879 个要十几分钟）。
+- 工具和 HTTP 接口共用同一套实现（`scanBatch` / `listRows` / `writeReport` / `doUnfollow` / `statusSummary`），
+  两边口径不会漂移。
+- **油猴脚本加两张图**：状态分布环形图（SVG，颜色跟状态标签一致）+ 停更时长分布
+  （2–3 年 / 3–5 年 / 5–8 年 / 8 年以上）。纯 SVG/DOM 画，不引任何外部库。
+
+### 修复
+- 油猴脚本的统计行从 1.1.0 起一直是空白的：`renderStats` 读 `app.ui.stats`，但实际注册的键叫
+  `statsLine`，两个名字对不上。
+- 插件 README 里的安装示例带着开发机路径（`D:\project-demo\...`），换成通用写法。
+
 ## 1.1.0 — 2026-11-06
 
 ### 新增

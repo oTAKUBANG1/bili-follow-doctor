@@ -1,8 +1,8 @@
-﻿// ==UserScript==
+// ==UserScript==
 // @name         B站关注体检 · Follow Doctor
 // @namespace    https://github.com/mituan/bili-follow-doctor
-// @version      1.1.0
-// @description  扫一遍你的关注列表，标出已注销、两年没更新的僵尸 UP；会开直播的一律保留。可一键导出 CSV，也可逐个取关。纯本地运行，不经过任何服务器。
+// @version      1.2.0
+// @description  扫一遍你的关注列表，标出已注销、两年没更新的僵尸 UP；会开直播的一律保留。带状态分布图和停更时长分布图，可一键导出 CSV，也可逐个取关。纯本地运行，不经过任何服务器。
 // @author       米团
 // @match        https://space.bilibili.com/*
 // @icon         https://www.bilibili.com/favicon.ico
@@ -18,7 +18,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.1.0";
+  const VERSION = "1.2.0";
   const CACHE_KEY = "bfd.cache.v2";
   const CONFIG_KEY = "bfd.config.v1";
   const TWO_YEARS = 730 * 86400;
@@ -424,12 +424,107 @@
     if (app.ui.bar) app.ui.bar.style.width = Math.max(0, Math.min(100, pct)) + "%";
   };
 
+  // 固定顺序 + 固定颜色：跟上面状态标签的颜色保持一致，图例才对得上
+  const CHART_ORDER = [
+    ["deleted", "已注销", "#e5646e"],
+    ["zombie", "僵尸号", "#f0a35e"],
+    ["empty", "零内容", "#8b98a9"],
+    ["dynonly", "只发动态", "#7aa2f7"],
+    ["streamed", "播过的主播", "#9d7cd8"],
+    ["live", "直播中", "#b98cff"],
+    ["mutual", "互关", "#4dc9c0"],
+    ["alive", "正常", "#5ec97a"],
+    ["error", "查询失败", "#8b98a9"],
+  ];
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const svgEl = (tag, attrs) => {
+    const n = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, String(v));
+    return n;
+  };
+
+  // 停更时长分桶（只统计僵尸号/零内容这些「有候选意义」的）
+  const STALE_BUCKETS = [
+    ["2–3 年", 730, 1095],
+    ["3–5 年", 1095, 1825],
+    ["5–8 年", 1825, 2920],
+    ["8 年以上", 2920, Infinity],
+  ];
+
+  const renderCharts = (rows) => {
+    const box = app.ui.charts;
+    if (!box) return;
+    const total = rows.length;
+    if (!total) { box.replaceChildren(); return; }
+
+    const counts = {};
+    for (const r of rows) counts[r.status] = (counts[r.status] || 0) + 1;
+    const parts = CHART_ORDER.filter(([k]) => counts[k]).map(([k, label, color]) => ({ k, label, color, n: counts[k] }));
+
+    // ── 环形图（stroke-dasharray 拼圆环）
+    const R = 42, CIRC = 2 * Math.PI * R;
+    const svg = svgEl("svg", { viewBox: "0 0 100 100", class: "bfd-donut" });
+    let acc = 0;
+    for (const p of parts) {
+      const len = (p.n / total) * CIRC;
+      const c = svgEl("circle", {
+        cx: 50, cy: 50, r: R, fill: "none", stroke: p.color, "stroke-width": 13,
+        "stroke-dasharray": `${Math.max(0, len - 0.7)} ${CIRC}`,
+        "stroke-dashoffset": -acc,
+        transform: "rotate(-90 50 50)",
+      });
+      svg.append(c);
+      acc += len;
+    }
+    const t1 = svgEl("text", { x: 50, y: 48, "text-anchor": "middle", class: "bfd-donut-n" });
+    t1.textContent = String(total);
+    const t2 = svgEl("text", { x: 50, y: 61, "text-anchor": "middle", class: "bfd-donut-l" });
+    t2.textContent = "个关注";
+    svg.append(t1, t2);
+
+    const legend = el("div", { class: "bfd-legend" },
+      ...parts.map((p) => el("div", { class: "bfd-lg" },
+        el("i", { style: `background:${p.color}` }),
+        el("span", { class: "bfd-lg-t" }, p.label),
+        el("b", {}, `${p.n} · ${((p.n / total) * 100).toFixed(p.n / total < 0.1 ? 1 : 0)}%`))));
+
+    // ── 停更时长分布
+    const stale = rows.filter((r) => r.status === "zombie" || r.status === "empty");
+    const ageDays = (r) => {
+      const t = Math.max(r.videoTs || 0, r.dynTs || 0);
+      return t ? (now() - t) / 86400 : null;
+    };
+    const bars = STALE_BUCKETS.map(([label, min, max]) => ({
+      label,
+      n: stale.filter((r) => { const d = ageDays(r); return d !== null && d >= min && d < max; }).length,
+    }));
+    const noTime = stale.length - bars.reduce((s, b) => s + b.n, 0);
+    const maxN = Math.max(1, ...bars.map((b) => b.n));
+
+    const barBox = el("div", { class: "bfd-bars" },
+      ...bars.map((b) => el("div", { class: "bfd-bar-row" },
+        el("span", { class: "bfd-bar-l" }, b.label),
+        el("div", { class: "bfd-bar-track" },
+          el("div", { class: "bfd-bar-fill", style: `width:${(b.n / maxN) * 100}%` })),
+        el("b", { class: "bfd-bar-n" }, String(b.n)))),
+      noTime > 0 ? el("div", { class: "bfd-note" }, `另 ${noTime} 个没有可用的时间（已注销 / 零内容）`) : null);
+
+    box.replaceChildren(
+      el("div", { class: "bfd-card" },
+        el("div", { class: "bfd-card-h" }, "状态分布"),
+        el("div", { class: "bfd-donut-wrap" }, svg, legend)),
+      el("div", { class: "bfd-card" },
+        el("div", { class: "bfd-card-h" }, `停更多久（候选 ${stale.length} 个）`),
+        barBox),
+    );
+  };
+
   const renderStats = () => {
     const rows = collectRows();
     const c = {};
     for (const r of rows) c[r.status] = (c[r.status] || 0) + 1;
-    if (app.ui.stats) {
-      app.ui.stats.textContent = `共 ${rows.length} 个 · 已注销 ${c.deleted || 0} · 僵尸 ${c.zombie || 0} · ` +
+    if (app.ui.statsLine) {
+      app.ui.statsLine.textContent = `共 ${rows.length} 个 · 已注销 ${c.deleted || 0} · 僵尸 ${c.zombie || 0} · ` +
         `主播 ${(c.live || 0) + (c.streamed || 0)} · 互关 ${c.mutual || 0} · 只发动态 ${c.dynonly || 0} · 零内容 ${c.empty || 0} · ` +
         `正常 ${c.alive || 0}`;
     }
@@ -441,6 +536,7 @@
       b.textContent = `${b.dataset.label} ${n}`;
       b.classList.toggle("on", k === app.filter);
     }
+    renderCharts(rows);
   };
 
   const renderRows = () => {
@@ -590,6 +686,26 @@
   .bfd-foot label{display:flex;align-items:center;gap:5px;cursor:pointer}
   .bfd-foot input[type=number]{width:70px;background:#1c2330;border:1px solid #273040;color:#e6edf6;
     border-radius:6px;padding:3px 6px}
+  /* 图表：环形 + 条形，纯 SVG/DOM，不引任何外部库 */
+  .bfd-charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(258px,1fr));gap:10px;margin:4px 0 10px}
+  .bfd-card{border:1px solid #273040;border-radius:12px;padding:10px 12px;background:#1a212c}
+  .bfd-card-h{font-size:12px;color:#8b98a9;margin-bottom:8px}
+  .bfd-donut-wrap{display:flex;gap:14px;align-items:center}
+  .bfd-donut{width:112px;height:112px;flex:none}
+  .bfd-donut-n{fill:#e6edf6;font-size:15px;font-weight:600}
+  .bfd-donut-l{fill:#8b98a9;font-size:7px}
+  .bfd-legend{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
+  .bfd-lg{display:flex;align-items:center;gap:6px;font-size:11.5px}
+  .bfd-lg i{width:8px;height:8px;border-radius:2px;flex:none;display:block}
+  .bfd-lg-t{color:#c9d1d9;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bfd-lg b{color:#8b98a9;font-weight:500;flex:none}
+  .bfd-bars{display:flex;flex-direction:column;gap:6px}
+  .bfd-bar-row{display:flex;align-items:center;gap:8px;font-size:11.5px}
+  .bfd-bar-l{width:62px;color:#8b98a9;flex:none}
+  .bfd-bar-track{flex:1;height:9px;background:#1c2330;border-radius:99px;overflow:hidden}
+  .bfd-bar-fill{height:100%;background:linear-gradient(90deg,#f0a35e,#e5646e);border-radius:99px;transition:width .2s}
+  .bfd-bar-n{width:26px;text-align:right;color:#c9d1d9;font-weight:500;flex:none}
+  .bfd-note{font-size:11px;color:#8b98a9;margin-top:2px}
   `;
 
   const openPanel = () => {
@@ -611,6 +727,7 @@
     const status = el("div", { class: "bfd-status" }, "准备就绪");
     const bar = el("div", { class: "bfd-bar" });
     const statsLine = el("div", { class: "bfd-stats" });
+    const charts = el("div", { class: "bfd-charts" });
 
     const panel = el("div", { class: "bfd-panel" },
       el("div", { class: "bfd-head" },
@@ -631,6 +748,7 @@
             app.cache = {}; saveCache(); renderRows(); renderStats(); setStatus("缓存已清空");
           } }, "清缓存")),
         el("div", { class: "bfd-filters" }, ...filters),
+        charts,
         statsLine,
         el("table", { class: "bfd-table" },
           el("thead", {}, el("tr", {},
@@ -664,7 +782,7 @@
     } }, panel);
 
     document.body.append(mask);
-    app.ui = { mask, panel, tbody, status, bar, statsLine, filters };
+    app.ui = { mask, panel, tbody, status, bar, statsLine, filters, charts };
 
     app.throttle.onCooldown = (sec) => setStatus(`被 B站 限流，冷却 ${sec} 秒…`, true);
     renderRows();
