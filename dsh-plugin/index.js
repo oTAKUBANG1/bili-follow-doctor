@@ -206,6 +206,51 @@ async function cardInfo(cookie, mid) {
   return { ok: false, err: `card code ${j.code}` }
 }
 
+// ---------------------------------------------------------------- 收藏夹
+// 跟关注体检共用凭证和家目录，数据另存一份 fav-cache.json。
+const FAV_CACHE = join(HOME, 'fav-cache.json')
+
+/** POST：清理这类写操作要 POST，webGet 只支持 GET */
+async function webPost(cookie, path, params = {}, tries = 3) {
+  const url = 'https://api.bilibili.com' + path
+  const body = new URLSearchParams(params).toString()
+  let lastErr = null
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'User-Agent': UA, Cookie: cookie, Referer: 'https://www.bilibili.com/',
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body,
+      })
+      if (r.status === 412 || r.status === 429) { await sleep(20000 * (i + 1)); continue }
+      return await r.json()
+    } catch (e) { lastErr = e; await sleep(2000) }
+  }
+  throw lastErr || new Error('请求失败')
+}
+
+async function favFolders(cookie, selfMid) {
+  const j = await webGet(cookie, '/x/v3/fav/folder/created/list-all', { up_mid: selfMid })
+  if (j.code !== 0) throw new Error(`收藏夹列表失败：code ${j.code} ${j.message || ''}`)
+  return Array.isArray(j.data) ? j.data : (j.data?.list || [])
+}
+
+const favPage = (cookie, mediaId, pn) => webGet(cookie, '/x/v3/fav/resource/list',
+  { media_id: String(mediaId), pn: String(pn), ps: '20', platform: 'web' })
+
+const favClean = (c, mediaId) => webPost(cookieHeader(c), '/x/v3/fav/resource/clean',
+  { media_id: String(mediaId), platform: 'web', csrf: c.bili_jct })
+
+function loadFavCache() { return readJson(FAV_CACHE, { folders: [], at: 0 }) }
+function saveFavCache(cache) {
+  ensureDir(HOME)
+  cache.at = nowSec()
+  writeFileSync(FAV_CACHE, JSON.stringify(cache))
+}
+
 // ---------------------------------------------------------------- 缓存
 function loadCache() { return readJson(CACHE_FILE, { rows: {}, updatedAt: 0 }) }
 function saveCache(cache) {
@@ -626,11 +671,67 @@ export function apply(ctx) {
   })
 
   let job = null
+  let favJob = null
   const jobView = () => (job ? {
     running: job.running, startedAt: job.startedAt, finishedAt: job.finishedAt,
     scanned: job.scanned, total: job.total, batches: job.batches,
     last: job.last, error: job.error || null,
   } : null)
+
+  const favJobView = () => (favJob ? {
+    running: favJob.running, startedAt: favJob.startedAt, finishedAt: favJob.finishedAt,
+    done: favJob.done, total: favJob.total, folders: favJob.folders, error: favJob.error || null,
+  } : null)
+
+  /** 后台扫所有收藏夹：一个夹一个夹来，每夹存一次盘，可断点续 */
+  async function favScanLoop(c) {
+    const cookie = cookieHeader(c)
+    const prev = loadFavCache()
+    const prevMap = new Map((prev.folders || []).map((f) => [String(f.id), f]))
+    favJob = { running: true, startedAt: Date.now(), folders: [], done: 0, total: 0, stop: false, error: null }
+    try {
+      const list = await favFolders(cookie, c.dedeuserid)
+      favJob.total = list.length
+      favJob.folders = list.map((f) => {
+        const old = prevMap.get(String(f.id))
+        return old?.done
+          ? { ...old, id: f.id, title: f.title, count: f.media_count }
+          : { id: f.id, title: f.title, count: f.media_count, dead: 0, scanned: 0, done: false }
+      })
+      favJob.done = favJob.folders.filter((f) => f.done).length
+
+      for (const f of favJob.folders) {
+        if (favJob.stop) break
+        if (f.done) continue
+        let pn = 1, dead = 0, scanned = 0, more = true
+        while (more && pn <= 400) {
+          if (favJob.stop) break
+          const j = await favPage(cookie, f.id, pn)
+          if (j.code !== 0) { f.error = `code ${j.code}`; break }
+          for (const m of (j.data?.medias || [])) {
+            scanned += 1
+            if (m.title === '已失效视频' || (m.attr & 1) === 1) dead += 1
+          }
+          more = Boolean(j.data?.has_more)
+          f.dead = dead
+          f.scanned = scanned
+          pn += 1
+          saveFavCache({ folders: favJob.folders })
+          // 收藏夹接口翻上百页就 412，主动歇一下
+          if (pn % 60 === 0) await sleep(25000)
+          else await sleep(500)
+        }
+        f.done = true
+        favJob.done += 1
+        saveFavCache({ folders: favJob.folders })
+      }
+    } catch (e) {
+      favJob.error = String(e?.message || e)
+    } finally {
+      favJob.running = false
+      favJob.finishedAt = Date.now()
+    }
+  }
 
   async function scanLoop(c, args) {
     job = { running: true, startedAt: Date.now(), scanned: 0, total: 0, batches: 0, last: null, stop: false, error: null }
@@ -684,6 +785,36 @@ export function apply(ctx) {
       if (!job?.running) return sendJson(res, 200, { ok: true, running: false })
       job.stop = true
       return sendJson(res, 200, { ok: true, stopping: true })
+    }
+
+    /* ── 收藏夹 ── */
+    if (req.method === 'GET' && p === '/api/bili-follow/fav') {
+      return sendJson(res, 200, { ok: true, job: favJobView(), cached: loadFavCache() })
+    }
+    if (req.method === 'POST' && p === '/api/bili-follow/fav/scan') {
+      if (favJob?.running) return sendJson(res, 200, { ok: false, error: '已经在扫了' })
+      let c
+      try { c = needCred() } catch (e) { return sendJson(res, 200, { ok: false, error: String(e?.message || e) }) }
+      favScanLoop(c)
+      return sendJson(res, 200, { ok: true, started: true })
+    }
+    if (req.method === 'POST' && p === '/api/bili-follow/fav/stop') {
+      if (favJob?.running) favJob.stop = true
+      return sendJson(res, 200, { ok: true })
+    }
+    if (req.method === 'POST' && p === '/api/bili-follow/fav/clean') {
+      const body = await readBody(req)
+      const mediaId = String(body.mediaId || '')
+      if (!mediaId) return sendJson(res, 200, { ok: false, error: '缺少 mediaId' })
+      let c
+      try { c = needCred() } catch (e) { return sendJson(res, 200, { ok: false, error: String(e?.message || e) }) }
+      const j = await favClean(c, mediaId)
+      if (j.code === 0) {
+        const cache = loadFavCache()
+        const hit = (cache.folders || []).find((x) => String(x.id) === mediaId)
+        if (hit) { hit.dead = 0; saveFavCache(cache) }
+      }
+      return sendJson(res, 200, j)
     }
 
     if (req.method === 'POST' && p === '/api/bili-follow/report') {

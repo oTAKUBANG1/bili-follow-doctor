@@ -1,20 +1,20 @@
 /**
  * dsh-bili-follow-doctor —— 浏览器半端（设置页）
  * ============================================================================
- * client bundle 不是 ESM，是自注册脚本（跟官方/第三方插件的约定一致）：
+ * client bundle 不是 ESM，是自注册脚本：
  *
  *     window.__ModuleLoader__.load({
  *       id: '<必须等于 package.json 的 name>',
  *       factory: (require) => ({ inject: ['slots'], apply(ctx) { ... } }),
  *     })
  *
- * 进「设置」的方式：slots.inject('settings.section', () => slots.register(元信息, 组件))
- * 数据全走 /api/bili-follow/*（host 端 index.js 挂的）。
+ * 一页两个页签：关注体检 / 收藏夹体检，共用同一套凭证和接口前缀
+ * （/api/bili-follow 和 /api/bili-follow/fav/*）。
  *
  * 设计取舍：
- *   - 扫描是后台任务 + 轮询进度，不在 HTTP 请求里等（879 个要十几分钟）。
- *   - 取关必须点两次（勾选 → 弹确认框），且主播/互关默认保护，跟命令行那边同一套规则。
- *   - 不引任何外部依赖，只用 React（宿主给）。
+ *   - 扫描是后台任务 + 轮询进度，不在 HTTP 请求里等。
+ *   - 取关、清空收藏夹都必须点两次（勾选/看清单 → 弹确认框）。
+ *   - 收藏夹清理走 B站 官方的「清空失效内容」接口，一次清一个夹。
  * ============================================================================
  */
 window.__ModuleLoader__.load({
@@ -83,6 +83,13 @@ window.__ModuleLoader__.load({
 [data-fd-btn][data-danger]{border-color:#5a2a30;color:#e5646e;}
 [data-fd-btn][data-danger]:hover{background:rgba(229,100,110,.12);}
 [data-fd-btn][disabled]{opacity:.45;cursor:default;}
+[data-fd-tabs]{display:flex;gap:4px;padding:3px;border-radius:10px;
+  background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.08));}
+[data-fd-tab]{flex:1;padding:7px 10px;border:0;border-radius:8px;background:transparent;font:inherit;
+  font-size:13px;cursor:pointer;color:var(--dsw-alias-label-secondary,inherit);}
+[data-fd-tab]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.1));}
+[data-fd-tab][data-on]{background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,inherit);
+  font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.12);}
 [data-fd-cards]{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px;}
 [data-fd-card]{display:flex;flex-direction:column;gap:1px;padding:9px 11px;border-radius:10px;cursor:pointer;
   border:1px solid var(--dsw-alias-bg-layer-3,rgba(127,127,127,.22));
@@ -92,7 +99,7 @@ window.__ModuleLoader__.load({
 [data-fd-card b]{font-size:17px;font-weight:600;line-height:22px;}
 [data-fd-card i]{font-style:normal;font-size:11px;line-height:15px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-fd-bar]{height:5px;border-radius:99px;overflow:hidden;background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.14));}
-[data-fd-bar div]{height:100%;background:linear-gradient(90deg,#fb7299,#7aa2f7);transition:width .25s;}
+[data-fd-bar] div{height:100%;background:linear-gradient(90deg,#fb7299,#7aa2f7);transition:width .25s;}
 [data-fd-table]{width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;}
 [data-fd-table] th{font-weight:500;text-align:left;padding:6px 5px;white-space:nowrap;
   color:var(--dsw-alias-label-tertiary,#9aa0a6);border-bottom:1px solid var(--dsw-alias-bg-layer-3,rgba(127,127,127,.22));}
@@ -120,7 +127,12 @@ window.__ModuleLoader__.load({
 [data-fd-chip][data-on]{color:#fb7299;border-color:#fb7299;background:rgba(251,114,153,.10);}
 [data-fd-kv]{font-size:11px;line-height:18px;color:var(--dsw-alias-label-tertiary,#9aa0a6);word-break:break-all;}
 [data-fd-form]{display:grid;grid-template-columns:112px 1fr;gap:6px 8px;align-items:center;max-width:520px;}
-[data-fd-form label]{font-size:11.5px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-fd-form] label{font-size:11.5px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-fd-folder]{display:flex;align-items:center;gap:9px;padding:7px 4px;
+  border-bottom:1px solid var(--dsw-alias-bg-layer-2,rgba(127,127,127,.10));}
+[data-fd-folder]:last-child{border-bottom:0;}
+[data-fd-folder-n]{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;}
+[data-fd-folder-d]{font-size:11.5px;color:#e5646e;flex:none;font-variant-numeric:tabular-nums;}
 `
 
     function Card({ label, n, on, onClick }) {
@@ -130,9 +142,11 @@ window.__ModuleLoader__.load({
     }
 
     function Panel() {
+      const [tab, setTab] = useState('follow')
       const [st, setSt] = useState(null)
+      const [fav, setFav] = useState(null)
       const [err, setErr] = useState('')
-      const [note, setNote] = useState(null) // {text, warn}
+      const [note, setNote] = useState(null)
       const [busy, setBusy] = useState('')
       const [filter, setFilter] = useState('zombie')
       const [rows, setRows] = useState([])
@@ -155,21 +169,29 @@ window.__ModuleLoader__.load({
       useEffect(() => { loadRowsRef.current = loadRows }, [loadRows])
       useEffect(() => { loadRows() }, [loadRows])
 
-      // 轮询总览：扫描中扫过的数量变了就顺手刷新名单
+      // 轮询：关注进度 + 收藏夹进度
       const lastScanned = useRef(-1)
+      const lastFavDone = useRef(-1)
       useEffect(() => {
         let alive = true
         let timer = null
         const tick = async () => {
           try {
             const s = await jget('/status')
+            const f = await jget('/fav')
             if (!alive) return
             setSt(s)
+            setFav(f)
             setErr('')
             const n = s.job?.scanned ?? -1
             if (n !== lastScanned.current) {
               lastScanned.current = n
               if (n >= 0) loadRowsRef.current()
+            }
+            const d = f.job?.done ?? -1
+            if (d !== lastFavDone.current) {
+              lastFavDone.current = d
+              if (d >= 0) setPage(0)
             }
           } catch (e) {
             if (alive) setErr(String(e?.message || e))
@@ -186,9 +208,13 @@ window.__ModuleLoader__.load({
       const cred = st?.credential || {}
       const pct = job?.total ? Math.min(100, (job.scanned / job.total) * 100) : 0
 
+      const favJob = fav?.job
+      const favScanning = Boolean(favJob?.running)
+      const favFoldersList = favJob?.folders?.length ? favJob.folders : (fav?.cached?.folders || [])
+      const favTotalDead = favFoldersList.reduce((s, f) => s + (f.dead || 0), 0)
+
       const onScan = async () => {
-        setBusy('scan')
-        setNote(null)
+        setBusy('scan'); setNote(null)
         try {
           const r = await jpost('/scan', { limit: 40, staleDays })
           if (!r.ok) setNote({ text: r.error || '启动失败', warn: true })
@@ -244,6 +270,34 @@ window.__ModuleLoader__.load({
         finally { setBusy('') }
       }
 
+      const onFavScan = async () => {
+        setBusy('favscan'); setNote(null)
+        try {
+          const r = await jpost('/fav/scan', {})
+          if (!r.ok) setNote({ text: r.error || '启动失败', warn: true })
+          else setNote({ text: '开始扫描收藏夹（后台跑，可以离开这一页）' })
+        } catch (e) { setNote({ text: String(e?.message || e), warn: true }) }
+        finally { setBusy('') }
+      }
+
+      const onFavStop = async () => {
+        try { await jpost('/fav/stop'); setNote({ text: '正在停…' }) }
+        catch (e) { setNote({ text: String(e?.message || e), warn: true }) }
+      }
+
+      const onFavClean = async (f) => {
+        if (!f.dead) return
+        if (!window.confirm(`清空「${f.title}」里的 ${f.dead} 个失效视频？\n\n`
+          + 'B站 没有批量恢复，删了要一个个手动加回来。')) return
+        setBusy('favclean-' + f.id)
+        try {
+          const r = await jpost('/fav/clean', { mediaId: f.id })
+          if (r.code === 0) setNote({ text: `✅ 「${f.title}」已清理` })
+          else setNote({ text: `❌ 「${f.title}」清理失败：code ${r.code} ${r.message || ''}`, warn: true })
+        } catch (e) { setNote({ text: String(e?.message || e), warn: true }) }
+        finally { setBusy('') }
+      }
+
       const toggle = (mid) => setPicked((p) => (p.includes(mid) ? p.filter((x) => x !== mid) : [...p, mid]))
       const allPicked = rows.length > 0 && rows.every((r) => picked.includes(r.mid))
 
@@ -252,9 +306,9 @@ window.__ModuleLoader__.load({
         ? h('div', { 'data-fd-row': '' },
           h('span', { 'data-fd-tag': '', 'data-s': 'alive' }, '已登录'),
           h('span', { 'data-fd-note': '' }, `UID ${cred.mid || '?'}`),
-          cred.hasCsrf ? null : h('span', { 'data-fd-note': '' }, '· 凭证里没有 bili_jct，取关会失败'))
+          cred.hasCsrf ? null : h('span', { 'data-fd-note': '' }, '· 凭证里没有 bili_jct，取关/清理会失败'))
         : h('div', { 'data-fd-sec': '' },
-          h('div', { 'data-fd-note': '' }, '没有 B站 登录凭证。两条路：装过「刷B站」的话本插件会直接复用它的登录；否则从浏览器 F12 → Application → Cookies 里抄下面四项。'),
+          h('div', { 'data-fd-note': '' }, '没有 B站 登录凭证。装过「刷B站」的话本插件会直接复用它的登录；否则从浏览器 F12 → Application → Cookies 里抄下面四项。'),
           h('div', { 'data-fd-form': '' },
             h('label', {}, 'SESSDATA'),
             h('input', { 'data-fd-input': '', value: form.sessdata,
@@ -271,6 +325,7 @@ window.__ModuleLoader__.load({
           h('div', { 'data-fd-row': '' },
             h('button', { 'data-fd-btn': '', 'data-primary': '', disabled: busy === 'cred', onClick: onSaveCred }, '保存凭证')))
 
+      /* ── 关注体检 ── */
       const chips = h('div', { 'data-fd-chips': '' },
         [['all', '全部']].concat(STATUS).map(([k, label]) =>
           h('button', {
@@ -304,20 +359,8 @@ window.__ModuleLoader__.load({
             : h('tr', {}, h('td', { colSpan: 6, 'data-fd-note': '', style: { padding: '14px 5px' } },
               '这个分类下没有记录。先点上面的「开始扫描」。')))))
 
-      return h('div', { 'data-fd-page': '' },
-
-        // 标题
-        h('div', { 'data-fd-sec': '' },
-          h('div', { 'data-fd-label': '', style: { fontSize: '15px', fontWeight: 600 } }, '🐟 B站关注体检'),
-          h('div', { 'data-fd-note': '' },
-            '扫一遍你关注的人，标出已注销、以及视频和动态都停更太久的账号。'
-            + '取关只动你勾选的、并且明确确认过的那几个；正在直播/播过的主播和互关默认跳过。')),
-
-        // 凭证
-        h('div', { 'data-fd-sec': '' }, h('div', { 'data-fd-h': '' }, '账号'), credBlock),
-
-        // 总览
-        h('div', { 'data-fd-sec': '' },
+      const followPane = [
+        h('div', { 'data-fd-sec': '', key: 'overview' },
           h('div', { 'data-fd-h': '' }, '总览'),
           h('div', { 'data-fd-row': '' },
             h('div', { 'data-fd-grow': '' },
@@ -330,8 +373,7 @@ window.__ModuleLoader__.load({
               onClick: () => { setFilter(k); setPage(0); setPicked([]) },
             })))),
 
-        // 阈值 + 扫描
-        h('div', { 'data-fd-sec': '' },
+        h('div', { 'data-fd-sec': '', key: 'scan' },
           h('div', { 'data-fd-h': '' }, '开始扫描'),
           h('div', { 'data-fd-row': '' },
             h('span', { 'data-fd-note': '' }, '多久没动静算僵尸'),
@@ -353,16 +395,12 @@ window.__ModuleLoader__.load({
             h('span', { 'data-fd-note': '', 'data-fd-grow': '' }, scanning
               ? `已扫 ${job.scanned}${job.total ? '/' + job.total : ''} 个 · 第 ${job.batches} 批`
               : st?.scanned ? '扫完了。名单在下面，按状态筛。' : '还没扫过。'))),
-        scanning || job?.scanned ? h('div', { 'data-fd-bar': '' }, h('div', { style: { width: pct + '%' } })) : null,
-        job?.error ? h('div', { 'data-fd-msg': '', 'data-warn': '' }, '扫描中断：' + job.error) : null,
-        report ? h('div', { 'data-fd-msg': '', 'data-good': '' },
+        scanning || job?.scanned ? h('div', { 'data-fd-bar': '', key: 'bar' }, h('div', { style: { width: pct + '%' } })) : null,
+        job?.error ? h('div', { 'data-fd-msg': '', 'data-warn': '', key: 'joberr' }, '扫描中断：' + job.error) : null,
+        report ? h('div', { 'data-fd-msg': '', 'data-good': '', key: 'rep' },
           '报表已生成：', h('br'), `CSV  ${report.csv}`, h('br'), `MD   ${report.md}`) : null,
-        note ? h('div', { 'data-fd-msg': '', 'data-warn': note.warn ? '' : undefined,
-          'data-good': note.warn ? undefined : '' }, note.text) : null,
-        err ? h('div', { 'data-fd-msg': '', 'data-warn': '' }, '接口出错：' + err) : null,
 
-        // 名单
-        h('div', { 'data-fd-sec': '' },
+        h('div', { 'data-fd-sec': '', key: 'list' },
           h('div', { 'data-fd-row': '' },
             h('div', { 'data-fd-h': '', 'data-fd-grow': '' }, `名单（${total}）`),
             h('button', {
@@ -375,6 +413,68 @@ window.__ModuleLoader__.load({
             h('span', { 'data-fd-note': '' }, `${page + 1} / ${Math.max(1, Math.ceil(total / PAGE))}`),
             h('button', { 'data-fd-btn': '', disabled: (page + 1) * PAGE >= total,
               onClick: () => setPage(page + 1) }, '下一页')) : null),
+      ]
+
+      /* ── 收藏夹体检 ── */
+      const favPane = [
+        h('div', { 'data-fd-sec': '', key: 'favhead' },
+          h('div', { 'data-fd-h': '' }, '收藏夹'),
+          h('div', { 'data-fd-note': '' },
+            '扫出收藏夹里已失效的视频（UP 删了 / 设私密 / 被下架）。清理走 B站 官方的「清空失效内容」接口，一次清一个收藏夹。'),
+          h('div', { 'data-fd-row': '' },
+            h('button', {
+              'data-fd-btn': '', 'data-primary': '', disabled: favScanning || busy === 'favscan' || !cred.ready, onClick: onFavScan,
+            }, favScanning ? '正在扫描…' : '扫描收藏夹'),
+            h('button', { 'data-fd-btn': '', disabled: !favScanning, onClick: onFavStop }, '停止'),
+            h('span', { 'data-fd-note': '', 'data-fd-grow': '' }, favScanning
+              ? `已扫 ${favJob.done}/${favJob.total} 个收藏夹`
+              : favFoldersList.length
+                ? `${favFoldersList.length} 个收藏夹 · ${favTotalDead} 个失效`
+                : '还没扫过。'))),
+        favScanning ? h('div', { 'data-fd-bar': '', key: 'favbar' },
+          h('div', { style: { width: (favJob.total ? (favJob.done / favJob.total) * 100 : 0) + '%' } })) : null,
+        favJob?.error ? h('div', { 'data-fd-msg': '', 'data-warn': '', key: 'faverr' }, '扫描中断：' + favJob.error) : null,
+
+        h('div', { 'data-fd-sec': '', key: 'favlist' },
+          h('div', { 'data-fd-h': '' }, favFoldersList.length ? `收藏夹（${favFoldersList.length}）` : ''),
+          favFoldersList.length
+            ? h('div', { 'data-fd-scroll': '' },
+              favFoldersList.map((f) => h('div', { 'data-fd-folder': '', key: f.id },
+                h('span', { 'data-fd-folder-n': '', title: f.title }, f.title),
+                h('span', { 'data-fd-folder-d': '' }, `${f.dead || 0} / ${f.scanned || f.count || 0}`),
+                h('button', {
+                  'data-fd-btn': '', 'data-danger': '',
+                  disabled: !f.dead || busy === 'favclean-' + f.id,
+                  onClick: () => onFavClean(f),
+                }, f.dead ? `清理 ${f.dead}` : '干净'))))
+            : h('div', { 'data-fd-note': '', style: { padding: '12px 2px' } }, '点上面的「扫描收藏夹」开始。')),
+      ]
+
+      return h('div', { 'data-fd-page': '' },
+        // 标题
+        h('div', { 'data-fd-sec': '' },
+          h('div', { 'data-fd-label': '', style: { fontSize: '15px', fontWeight: 600 } }, '🐟 B站体检'),
+          h('div', { 'data-fd-note': '' },
+            '两个体检合在一页：关注列表查「人还在不在」，收藏夹查「视频还在不在」。'
+            + '取关和清理都要你确认过才动，主播/互关默认跳过。')),
+
+        // 页签
+        h('div', { 'data-fd-tabs': '' },
+          [['follow', '关注体检'], ['fav', '收藏夹体检']].map(([k, label]) =>
+            h('button', {
+              key: k, 'data-fd-tab': '', 'data-on': tab === k ? '' : undefined,
+              onClick: () => setTab(k),
+            }, label))),
+
+        // 凭证（两个页签共用）
+        h('div', { 'data-fd-sec': '' }, h('div', { 'data-fd-h': '' }, '账号'), credBlock),
+
+        note ? h('div', { 'data-fd-msg': '', 'data-warn': note.warn ? '' : undefined,
+          'data-good': note.warn ? undefined : '' }, note.text) : null,
+        err ? h('div', { 'data-fd-msg': '', 'data-warn': '' }, '接口出错：' + err) : null,
+
+        // 内容
+        ...(tab === 'follow' ? followPane : favPane),
 
         // 尾巴
         h('div', { 'data-fd-kv': '' },
@@ -395,7 +495,7 @@ window.__ModuleLoader__.load({
         const slots = (typeof ctx.get === 'function' ? ctx.get('slots') : undefined) || ctx.slots
         if (!slots) return
         slots.inject('settings.section', () => slots.register(
-          { name: 'settings.section', id: 'bili-follow-doctor', order: 32, label: '关注体检' },
+          { name: 'settings.section', id: 'bili-follow-doctor', order: 32, label: 'B站体检' },
           () => h(Panel),
         ))
       },
