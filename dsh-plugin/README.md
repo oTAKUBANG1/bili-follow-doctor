@@ -1,10 +1,14 @@
 # dsh-bili-follow-doctor
 
-DeepSeek Harness 插件版「B站关注体检」：扫关注 → 查最近投稿/动态 → 出名单 → 经确认后逐个取关。
+DeepSeek Harness 插件版「B站体检」。一个设置页，两个页签：
+
+- **关注体检** — 扫关注 → 查最近投稿/动态 → 出名单 → 确认后逐个取关
+- **收藏夹体检** — 扫所有收藏夹 → 找出已失效的视频 → 确认后按收藏夹清理
+
 只走本机网络，凭证存在 `~/.dsh/bili-follow/cred.json`，不经过第三方。
 
-**v1.2.0 起自带设置页**：不用每次让 AI 帮你敲工具，DSH「设置」里多一页「关注体检」，
-总览、阈值、开扫、看名单、出报表、勾选取关都在里面。
+**设置页**（v1.2.0 起）：不用每次让 AI 帮你敲工具，DSH「设置」里多一页「B站体检」，
+总览、阈值、开扫、看名单、出报表、勾选取关 / 按夹清理都在里面。
 
 ## 安装
 
@@ -16,18 +20,30 @@ dsh plugin --profile web add github:oTAKUBANG1/bili-follow-doctor#path:/dsh-plug
 dsh plugin --profile web add link:/path/to/bili-follow-doctor/dsh-plugin
 ```
 
-装上后重启 DSH，左侧「设置」里会出现「关注体检」这一页。会话里的工具也同时可用。
+装上后重启 DSH，左侧「设置」里会出现「B站体检」这一页。会话里的工具也同时可用。
 
 ## 设置页怎么用
 
+两个页签共用同一个「账号」区：
+
 1. **账号**：装过「刷B站」的话会自动复用它的登录；没有就从浏览器 F12 → Application → Cookies
    抄 `SESSDATA` / `bili_jct` / `buvid3` / `DedeUserID` 四项填进去。
+
+### 关注体检
+
 2. **多久没动静算僵尸**：填天数，或者点 1 年 / 2 年 / 3 年。
 3. **开始扫描**：后台跑，可以离开这一页去看别的，进度条会自己走。
 4. **名单**：按状态筛（僵尸号 / 已注销 / 零内容 / 只发动态 / 播过的主播 / 互关 / 正常），可翻页。
 5. **取关**：勾选 → 点「取关选中的」→ 弹确认框。正在直播/播过的主播和互关默认被跳过，
    要删它们得单独点那行的按钮（跟命令行 `allowLive` / `allowMutual` 同一套规则）。
 6. **导出 CSV + Markdown**：落在 `~/.dsh/bili-follow/out/`。
+
+### 收藏夹体检
+
+7. **扫描收藏夹**：把每个收藏夹翻一遍，统计里面失效了多少（UP 删了 / 设私密 / 被下架）。
+   进度按「扫完几个夹」走，结果存 `~/.dsh/bili-follow/fav-cache.json`，中断可续。
+8. **清理**：每个夹子后面一个「清理 N」按钮，点了要确认一次。
+   清理走 B站 官方的清空失效内容接口，**一次清空一个收藏夹里的所有失效视频**。
 
 ## 工具（会话里用）
 
@@ -41,8 +57,11 @@ dsh plugin --profile web add link:/path/to/bili-follow-doctor/dsh-plugin
 | `bili_follow_unfollow` | 取关（**必须 `confirm:true`**，一次最多 50 个；正在直播/播过的默认跳过，`allowLive:true` 才删） |
 | `bili_follow_status` | 总览：凭证是否就绪、扫了多少、各状态数量 |
 
-设置页读写的接口在 `/api/bili-follow/*`（`status` / `list` / `scan` / `stop` / `report` / `unfollow` / `cred`），
-跟工具共用同一套实现，不会两边口径漂移。
+设置页读写的接口在 `/api/bili-follow/*`，跟工具共用同一套实现，不会两边口径漂移：
+
+| 关注体检 | 收藏夹体检 |
+|---|---|
+| `status` / `list` / `scan` / `stop` / `report` / `unfollow` / `cred` | `fav` / `fav/scan` / `fav/stop` / `fav/clean` |
 
 ## 典型流程
 

@@ -66,9 +66,13 @@ python unfollow.py --report out/follow_final_xxx.csv --status "2年无任何更�
 dsh plugin --profile web add github:oTAKUBANG1/bili-follow-doctor#path:/dsh-plugin
 ```
 
-装上重启后，DSH「设置」里多一页**「关注体检」**：总览、阈值、后台扫描进度、名单筛选、
-导出报表、勾选取关都在界面上，不用每次让 AI 敲工具。同时注册 7 个工具供会话使用
-（登录 / 扫描 / 列名单 / 报表 / 取关 / 状态）。详见 [`dsh-plugin/README.md`](dsh-plugin/README.md)。
+装上重启后，DSH「设置」里多一页**「B站体检」**，两个页签：
+
+- **关注体检**：总览、阈值、后台扫描进度、名单筛选、导出报表、勾选取关
+- **收藏夹体检**：扫描所有收藏夹、按夹显示失效数、逐个夹清理
+
+不用每次让 AI 敲工具。同时注册 7 个工具供会话使用（登录 / 扫描 / 列名单 / 报表 / 取关 / 状态）。
+详见 [`dsh-plugin/README.md`](dsh-plugin/README.md)。
 
 ## 可视化仪表盘
 
