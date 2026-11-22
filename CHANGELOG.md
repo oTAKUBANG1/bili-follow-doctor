@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 1.5.0 — 2026-11-19
+
+### 新增
+- **悬浮按钮可隐藏**：面板底部加「隐藏悬浮按钮」勾选框，勾上按钮立刻消失、刷新也保持。
+  隐藏后按 `Alt+B` 随时唤出面板（面板里能再勾回来）。
+  - 开关存在 GM 存储里（`GM_getValue` / `GM_setValue`），不是 localStorage ——
+    B站 有 space / www / t.bilibili / live / search 多个子域，localStorage 各存各的，
+    在空间页隐藏了、主页又冒出来就不对了。
+  - 脚本管理器不支持 GM 存储时自动回退 localStorage（只在那一个域生效）。
+
 ## 1.4.0 / 插件 1.3.0 — 2026-11-10
 
 ### 新增

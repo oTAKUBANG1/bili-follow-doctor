@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站体检 · Follow & Fav Doctor
 // @namespace    https://github.com/mituan/bili-follow-doctor
-// @version      1.4.0
+// @version      1.5.0
 // @description  两个体检合在一个面板：① 关注列表——标出已注销和长期不更新的僵尸 UP，播过直播的保留；② 收藏夹——找出已失效的视频，一键清理。纯本地运行，不经过任何服务器。
 // @author       米团
 // @match        *://space.bilibili.com/*
@@ -14,6 +14,8 @@
 // @downloadURL  https://cdn.jsdelivr.net/gh/oTAKUBANG1/bili-follow-doctor@main/bili-follow-doctor.user.js
 // @icon         https://www.bilibili.com/favicon.ico
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @connect      app.bilibili.com
 // @connect      api.bilibili.com
 // @connect      api.live.bilibili.com
@@ -25,12 +27,30 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.0";
+  const VERSION = "1.5.0";
   const CACHE_KEY = "bfd.cache.v2";
   const CONFIG_KEY = "bfd.config.v1";
+  // 悬浮按钮显示/隐藏：走 GM 存储而不是 localStorage。
+  // 原因：B站 有 space / www / t.bilibili / live / search 好几个域，localStorage 各存各的，
+  // 在空间页隐藏了、主页又冒出来。GM_setValue 是跨域共享的，才符合「一个开关管全部」的预期。
+  const FAB_KEY = "bfd.fab.hidden.v1";
   const TWO_YEARS = 730 * 86400;
 
   // ---------------------------------------------------------------- 小工具
+  // 悬浮按钮开关的读写。优先 GM 存储（跨 B站 各子域共享），没有 GM 就退回 localStorage。
+  const readFabHidden = () => {
+    try {
+      if (typeof GM_getValue === "function") return GM_getValue(FAB_KEY, false) === true;
+      return localStorage.getItem(FAB_KEY) === "1";
+    } catch { return false; }
+  };
+  const writeFabHidden = (v) => {
+    try {
+      if (typeof GM_setValue === "function") GM_setValue(FAB_KEY, !!v);
+      localStorage.setItem(FAB_KEY, v ? "1" : "0");
+    } catch { /* ignore */ }
+  };
+
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const now = () => Math.floor(Date.now() / 1000);
   const fmtDate = (ts) => {
@@ -317,6 +337,9 @@
   const app = {
     cache: {},
     config: { interval: 1200, autoFans: true, staleDays: 730 },
+    // 悬浮按钮：hidden 走 GM 存储跨子域共享，fab 是按钮元素本身（隐藏后仍能通过 Alt+B 开面板）
+    fabHidden: false,
+    fab: null,
     // 两条独立的限速池：app 通道（投稿）可以快，web 接口（动态/资料）必须慢。
     // 挤在一个池里是之前慢的主因 —— 837 个 × 3 请求 × 1.2s ≈ 50 分钟。
     throttleApp: new Throttle(450),
@@ -1005,6 +1028,13 @@
             app.config.autoFans = e.target.checked;
             localStorage.setItem(CONFIG_KEY, JSON.stringify(app.config));
           } }), "顺便取粉丝数（多一次请求）"),
+        el("label", { title: "隐藏后按 Alt+B 仍可打开本面板" },
+          el("input", { type: "checkbox", checked: app.fabHidden ? "" : null,
+            onchange: (e) => {
+              app.fabHidden = e.target.checked;
+              writeFabHidden(app.fabHidden);
+              if (app.fab) app.fab.style.display = app.fabHidden ? "none" : "";
+            } }), "隐藏悬浮按钮（Alt+B 唤出）"),
         el("span", { style: "margin-left:auto" }, "数据只存在这个浏览器里")));
 
     const mask = el("div", { class: "bfd-mask", onclick: (e) => {
@@ -1026,8 +1056,22 @@
     loadFavState();
     app.throttleWeb.interval = app.config.interval;
     app.throttle.interval = app.config.interval;
-    const fab = el("button", { class: "bfd-fab", title: "关注体检 + 收藏夹体检", onclick: openPanel }, "🐟 B站体检");
+    app.fabHidden = readFabHidden();
+    const fab = el("button", {
+      class: "bfd-fab",
+      title: "关注体检 + 收藏夹体检（隐藏后在面板底部可重新打开，或按 Alt+B）",
+      onclick: openPanel,
+    }, "🐟 B站体检");
+    app.fab = fab;
+    fab.style.display = app.fabHidden ? "none" : "";
     document.body.append(fab);
+    // 悬浮按钮隐藏之后，Alt+B 是唯一入口，所以无条件绑定
+    window.addEventListener("keydown", (e) => {
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === "b" || e.key === "B")) {
+        e.preventDefault();
+        openPanel();
+      }
+    });
     const style = document.createElement("style");
     style.textContent = CSS;
     document.head.append(style);
