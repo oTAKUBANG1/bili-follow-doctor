@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站体检 · Follow & Fav Doctor
 // @namespace    https://github.com/mituan/bili-follow-doctor
-// @version      1.5.0
+// @version      1.5.1
 // @description  两个体检合在一个面板：① 关注列表——标出已注销和长期不更新的僵尸 UP，播过直播的保留；② 收藏夹——找出已失效的视频，一键清理。纯本地运行，不经过任何服务器。
 // @author       米团
 // @match        *://space.bilibili.com/*
@@ -27,7 +27,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.5.0";
+  const VERSION = "1.5.1";
   const CACHE_KEY = "bfd.cache.v2";
   const CONFIG_KEY = "bfd.config.v1";
   // 悬浮按钮显示/隐藏：走 GM 存储而不是 localStorage。
@@ -698,8 +698,12 @@
   const CSS = `
   .bfd-fab{position:fixed;right:22px;bottom:26px;z-index:9999;display:flex;align-items:center;gap:6px;
     padding:10px 16px;border-radius:999px;background:#fb7299;color:#fff;font:14px/1 system-ui,sans-serif;
-    box-shadow:0 6px 20px rgba(251,114,153,.45);cursor:pointer;border:0;transition:.15s}
+    box-shadow:0 6px 20px rgba(251,114,153,.45);cursor:pointer;border:0;transition:.18s}
   .bfd-fab:hover{transform:translateY(-1px);filter:brightness(1.05)}
+  /* 「隐藏」不用 display:none —— 那样没法靠鼠标划到右边缘再浮出来。
+     改成透明 + 不吃鼠标事件，peek 时淡入并恢复点击。 */
+  .bfd-fab.hidden{opacity:0;pointer-events:none;transform:translateX(12px)}
+  .bfd-fab.hidden.peek{opacity:1;pointer-events:auto;transform:none}
   .bfd-mask{position:fixed;inset:0;z-index:2147483646;background:rgba(8,12,18,.55);display:flex;
     align-items:center;justify-content:center;backdrop-filter:blur(2px)}
   .bfd-panel{width:min(1080px,94vw);max-height:88vh;display:flex;flex-direction:column;overflow:hidden;
@@ -916,6 +920,15 @@
     }
   };
 
+  // 悬浮按钮显隐：初始 mount 和面板里的勾选框都走这个，避免两处逻辑各写一遍跑偏
+  function applyFabHidden(hidden) {
+    app.fabHidden = !!hidden;
+    writeFabHidden(app.fabHidden);
+    if (!app.fab) return;
+    app.fab.classList.toggle("hidden", app.fabHidden);
+    if (!app.fabHidden) app.fab.classList.remove("peek");
+  }
+
   const openPanel = () => {
     if (app.ui.mask) { app.ui.mask.style.display = "flex"; return; }
 
@@ -1028,13 +1041,9 @@
             app.config.autoFans = e.target.checked;
             localStorage.setItem(CONFIG_KEY, JSON.stringify(app.config));
           } }), "顺便取粉丝数（多一次请求）"),
-        el("label", { title: "隐藏后按 Alt+B 仍可打开本面板" },
+        el("label", { title: "隐藏后把鼠标划到屏幕最右边缘停一下，按钮会浮出来；也可以在这里勾回来" },
           el("input", { type: "checkbox", checked: app.fabHidden ? "" : null,
-            onchange: (e) => {
-              app.fabHidden = e.target.checked;
-              writeFabHidden(app.fabHidden);
-              if (app.fab) app.fab.style.display = app.fabHidden ? "none" : "";
-            } }), "隐藏悬浮按钮（Alt+B 唤出）"),
+            onchange: (e) => applyFabHidden(e.target.checked) }), "隐藏悬浮按钮（划右边缘唤出）"),
         el("span", { style: "margin-left:auto" }, "数据只存在这个浏览器里")));
 
     const mask = el("div", { class: "bfd-mask", onclick: (e) => {
@@ -1058,20 +1067,31 @@
     app.throttle.interval = app.config.interval;
     app.fabHidden = readFabHidden();
     const fab = el("button", {
-      class: "bfd-fab",
-      title: "关注体检 + 收藏夹体检（隐藏后在面板底部可重新打开，或按 Alt+B）",
+      class: "bfd-fab" + (app.fabHidden ? " hidden" : ""),
+      title: "关注体检 + 收藏夹体检（隐藏后把鼠标划到屏幕右边缘唤出）",
       onclick: openPanel,
     }, "🐟 B站体检");
     app.fab = fab;
-    fab.style.display = app.fabHidden ? "none" : "";
     document.body.append(fab);
-    // 悬浮按钮隐藏之后，Alt+B 是唯一入口，所以无条件绑定
-    window.addEventListener("keydown", (e) => {
-      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === "b" || e.key === "B")) {
-        e.preventDefault();
-        openPanel();
+
+    // 隐藏后的唤出入口：鼠标贴住屏幕右边缘停一会儿 → 按钮浮出；移开 → 淡回。
+    // 不用快捷键：Alt+B 会跟浏览器/扩展抢键（实测冲突），热区不占任何键。
+    const EDGE_ZONE = 26;  // 距右边缘多少 px 内算触发
+    const DWELL_MS = 260;  // 停多久才浮出，避免鼠标路过就闪
+    const FADE_MS = 700;   // 移开后多久淡回
+    let peekTimer = 0;
+    let fadeTimer = 0;
+    window.addEventListener("mousemove", (e) => {
+      if (!app.fabHidden) return;
+      const nearEdge = e.clientX >= window.innerWidth - EDGE_ZONE;
+      clearTimeout(peekTimer);
+      clearTimeout(fadeTimer);
+      if (nearEdge) {
+        if (!fab.classList.contains("peek")) peekTimer = setTimeout(() => fab.classList.add("peek"), DWELL_MS);
+      } else if (fab.classList.contains("peek")) {
+        fadeTimer = setTimeout(() => fab.classList.remove("peek"), FADE_MS);
       }
-    });
+    }, { passive: true });
     const style = document.createElement("style");
     style.textContent = CSS;
     document.head.append(style);
